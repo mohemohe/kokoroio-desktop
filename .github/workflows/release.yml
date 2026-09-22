@@ -1,0 +1,170 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag (v1.2.3 or v1.2.3-rc.1)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build, sign, and notarize
+    runs-on: macos-26
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      NOTARY_PROFILE: kokoro-release
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+      commit: ${{ steps.version.outputs.commit }}
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ format('refs/tags/{0}', inputs.tag || github.ref_name) }}
+          persist-credentials: false
+
+      - name: Validate release version
+        id: version
+        run: |
+          NUMERIC='(0|[1-9][0-9]*)'
+          PRERELEASE_ID='(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
+          TAG_PATTERN="^v${NUMERIC}\\.${NUMERIC}\\.${NUMERIC}(-${PRERELEASE_ID}(\\.${PRERELEASE_ID})*)?$"
+          if [[ ! "$RELEASE_TAG" =~ $TAG_PATTERN ]]; then
+            echo '::error::Use a tag such as v1.2.3 or v1.2.3-rc.1.'
+            exit 1
+          fi
+          VERSION="${RELEASE_TAG#v}"
+          PRERELEASE=false
+          if [[ "$VERSION" == *-* ]]; then PRERELEASE=true; fi
+          {
+            echo "tag=$RELEASE_TAG"
+            echo "version=$VERSION"
+            echo "prerelease=$PRERELEASE"
+            echo "commit=$(git rev-parse HEAD)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          xcodebuild -version
+          swift --version
+
+      - name: Test
+        run: swift test --scratch-path .build/ci-tests --parallel
+
+      - name: Import signing certificate and notarization credentials
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+          MACOS_CERTIFICATE_NAME: ${{ secrets.MACOS_CERTIFICATE_NAME }}
+          KEYCHAIN_PWD: ${{ secrets.KEYCHAIN_PWD }}
+          NOTARIZATION_APPLE_ID: ${{ secrets.NOTARIZATION_APPLE_ID }}
+          NOTARIZATION_TEAM_ID: ${{ secrets.NOTARIZATION_TEAM_ID }}
+          NOTARIZATION_PASSWORD: ${{ secrets.NOTARIZATION_PASSWORD }}
+        run: |
+          for NAME in MACOS_CERTIFICATE MACOS_CERTIFICATE_PWD MACOS_CERTIFICATE_NAME KEYCHAIN_PWD NOTARIZATION_APPLE_ID NOTARIZATION_TEAM_ID NOTARIZATION_PASSWORD; do
+            if [[ -z "${!NAME}" ]]; then
+              echo "::error::Missing required secret: $NAME"
+              exit 1
+            fi
+          done
+          if [[ "$MACOS_CERTIFICATE_NAME" != 'Developer ID Application: '* ]]; then
+            echo '::error::MACOS_CERTIFICATE_NAME must be a Developer ID Application identity.'
+            exit 1
+          fi
+          umask 077
+          KEYCHAIN_PATH="$RUNNER_TEMP/kokoro-release.keychain-db"
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+          CERTIFICATE_PATH="$RUNNER_TEMP/kokoro-certificate.p12"
+          trap 'rm -f "$CERTIFICATE_PATH"' EXIT
+          printf '%s' "$MACOS_CERTIFICATE" | base64 --decode > "$CERTIFICATE_PATH"
+          security create-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" -k "$KEYCHAIN_PATH" \
+            -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PWD" "$KEYCHAIN_PATH" > /dev/null
+          security list-keychains -d user -s "$KEYCHAIN_PATH" "$HOME/Library/Keychains/login.keychain-db"
+          xcrun notarytool store-credentials "$NOTARY_PROFILE" \
+            --keychain "$KEYCHAIN_PATH" \
+            --apple-id "$NOTARIZATION_APPLE_ID" \
+            --team-id "$NOTARIZATION_TEAM_ID" \
+            --password "$NOTARIZATION_PASSWORD"
+
+      - name: Build, sign, notarize, and package
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          BUILD_NUMBER: ${{ github.run_number }}
+          SIGN_IDENTITY: ${{ secrets.MACOS_CERTIFICATE_NAME }}
+        run: bash scripts/build-release.sh --signed
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: macos-release
+          path: |
+            build/release/KokoroDesktop-${{ steps.version.outputs.version }}-universal.zip
+            build/release/KokoroDesktop-${{ steps.version.outputs.version }}-universal.dmg
+            build/release/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Cleanup signing credentials
+        if: always()
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/kokoro-release.keychain-db"
+          if [[ -f "$KEYCHAIN_PATH" ]]; then
+            security delete-keychain "$KEYCHAIN_PATH"
+          fi
+          rm -f "$RUNNER_TEMP/kokoro-certificate.p12"
+
+  release:
+    name: Create draft GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download signed artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: macos-release
+          path: artifacts
+
+      - name: Verify checksums
+        working-directory: artifacts
+        run: sha256sum --check SHA256SUMS.txt
+
+      - name: Create draft release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          tag_name: ${{ needs.build.outputs.tag }}
+          target_commitish: ${{ needs.build.outputs.commit }}
+          name: Kokoro Desktop ${{ needs.build.outputs.tag }}
+          draft: true
+          prerelease: ${{ needs.build.outputs.prerelease == 'true' }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            artifacts/KokoroDesktop-${{ needs.build.outputs.version }}-universal.zip
+            artifacts/KokoroDesktop-${{ needs.build.outputs.version }}-universal.dmg
+            artifacts/SHA256SUMS.txt
