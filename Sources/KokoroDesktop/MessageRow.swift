@@ -1,6 +1,7 @@
 import AppKit
 import KokoroCore
 import SwiftUI
+import Textual
 
 struct MessageRow: View {
     let message: Message
@@ -39,11 +40,12 @@ struct MessageRow: View {
                         .italic()
                         .foregroundStyle(.secondary)
                 } else {
-                    Text(markdownBody)
+                    StructuredText(markdownSource, parser: ChatMarkdownParser())
                         .font(.system(size: 13))
                         .lineSpacing(4)
-                        .textSelection(.enabled)
-                        .tint(KChatPalette.accent)
+                        .textual.textSelection(.enabled)
+                        .textual.inlineStyle(InlineStyle.default.link(.foregroundColor(KChatPalette.accent)))
+                        .textual.tableStyle(.overflow)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .fixedSize(horizontal: false, vertical: true)
                     MessageEmbedsView(message: message)
@@ -67,32 +69,14 @@ struct MessageRow: View {
         .accessibilityElement(children: .contain)
     }
 
-    private var markdownBody: AttributedString {
-        let displayText = displayMarkdown
-        return (try? AttributedString(
-            markdown: displayText,
-            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-        )) ?? AttributedString(displayText)
+    private var markdownSource: String {
+        message.rawContent.isEmpty ? message.text : message.rawContent
     }
+}
 
-    private var displayMarkdown: String {
-        let source = message.rawContent.isEmpty ? message.text : message.rawContent
-        guard let expression = try? NSRegularExpression(pattern: "<([@#])[A-Za-z0-9_-]+\\|([^<>\\r\\n]+)>") else {
-            return source
-        }
-        let result = NSMutableString(string: source)
-        let matches = expression.matches(in: source, range: NSRange(source.startIndex..., in: source))
-        for match in matches.reversed() {
-            let prefix = (source as NSString).substring(with: match.range(at: 1))
-            let label = (source as NSString).substring(with: match.range(at: 2))
-            // Reference names are literal text, even when they contain Markdown punctuation.
-            let escapedLabel = label.reduce(into: "") { output, character in
-                if "\\`*_[]<>".contains(character) { output.append("\\") }
-                output.append(character)
-            }
-            result.replaceCharacters(in: match.range, with: prefix + escapedLabel)
-        }
-        return result as String
+private struct ChatMarkdownParser: MarkupParser {
+    func attributedString(for input: String) throws -> AttributedString {
+        MessageMarkdown.attributedString(for: input)
     }
 }
 
@@ -124,3 +108,41 @@ struct ChatAvatar: View {
         .accessibilityHidden(true)
     }
 }
+
+#if DEBUG
+#Preview("Markdown message", traits: .fixedLayout(width: 640, height: 760)) {
+    ScrollView {
+        MessageRow(message: Message(
+            id: 1,
+            rawContent: """
+            # Markdown の表示
+
+            **太字**、*斜体*、~~取り消し線~~、[kokoro.io](https://kokoro.io)
+            この行は単一改行で表示します。
+            <#CHANNEL|開発 *チャンネル*> と <@USER|山田さん> への参照です。
+
+            - 最初の項目
+            - 二番目の項目
+              - 入れ子の項目
+
+            > 引用文です。
+            > 複数行の引用も表示します。
+
+            ```swift
+            let message = "こんにちは、Markdown!"
+            print(message)
+            ```
+
+            | 機能 | 状態 |
+            | --- | --- |
+            | 見出し・リスト | 表示できます |
+            | コード・表 | 表示できます |
+            """,
+            channel: Channel(id: "CHANNEL", channelName: "開発"),
+            profile: Profile(id: "USER", screenName: "yamada", displayName: "山田 太郎")
+        ))
+        .padding(.vertical, 12)
+    }
+    .background(Color(nsColor: .textBackgroundColor))
+}
+#endif

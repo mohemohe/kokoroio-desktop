@@ -1,6 +1,6 @@
 # GitHub Actions でのビルド・署名・リリース
 
-macOS 14 以降で動く Universal アプリ（arm64 / x86_64）を配布します。ビルドには GitHub-hosted の `macos-26` runner と `/Applications/Xcode.app` を使用します。
+macOS 15 以降で動く Universal アプリ（arm64 / x86_64）を配布します。ビルドには GitHub-hosted の `macos-26` runner と `/Applications/Xcode.app` を使用します。
 
 ## 初回設定
 
