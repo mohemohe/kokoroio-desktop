@@ -51,7 +51,7 @@ git push origin v0.1.0
 
 1. タグのコミットをチェックアウトし、バージョン形式を検証してテストを実行します。
 2. Developer ID 証明書と公証用資格情報を一時 keychain に取り込みます。必須 Secret が欠けている場合は失敗します。
-3. Universal アプリを Hardened Runtime・App Sandbox 有効でビルドし、Developer ID 署名を検証します。
+3. Universal アプリを Hardened Runtime・App Sandbox 有効でビルドし、Developer ID 署名を検証します。Release ビルドでは `CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO` を設定し、両アーキテクチャにデバッグ用の `com.apple.security.get-task-allow` が有効になっていないことを公証前に確認します。
 4. アプリを Apple に公証申請し、`Accepted` を確認してチケットを staple・検証します。
 5. staple 済みアプリの ZIP と、アプリおよび Applications ショートカットを含む DMG を作ります。DMG も署名・公証・staple・検証します。
 6. チェックサムを生成して artifact に保存し（14 日間）、GitHub Release の**下書き**を作成します。

@@ -179,6 +179,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = Resources/KokoroDesktop.entitlements;
 				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO;
 				CODE_SIGN_STYLE = Manual;
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_APP_SANDBOX = YES;

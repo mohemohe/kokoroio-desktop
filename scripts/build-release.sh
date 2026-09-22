@@ -71,6 +71,7 @@ xcodebuild \
   'ONLY_ACTIVE_ARCH=NO' \
   'ENABLE_APP_SANDBOX=YES' \
   'ENABLE_HARDENED_RUNTIME=YES' \
+  'CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO' \
   "MARKETING_VERSION=${MARKETING_VERSION}" \
   "CURRENT_PROJECT_VERSION=${BUILD_NUMBER}" \
   "${SIGNING_SETTINGS[@]}" \
@@ -95,19 +96,24 @@ ditto "$BUILT_APP" "$APP_PATH"
 INFO_PLIST="${APP_PATH}/Contents/Info.plist"
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$INFO_PLIST")" == "$MARKETING_VERSION" ]] || fail 'Built app marketing version does not match VERSION.'
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$INFO_PLIST")" == "$BUILD_NUMBER" ]] || fail 'Built app build number does not match BUILD_NUMBER.'
+codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+# Xcode can inject debugging entitlements even into a Release build. Check both
+# slices of the signed app before submitting it to Apple's notarization service.
 for ARCH in arm64 x86_64; do
   xcrun lipo "${APP_PATH}/Contents/MacOS/KokoroDesktop" -verify_arch "$ARCH"
+  ENTITLEMENTS_PATH="${STAGING_DIR}/entitlements-${ARCH}.plist"
+  codesign --display --arch "$ARCH" --entitlements - --xml "$APP_PATH" > "$ENTITLEMENTS_PATH"
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.app-sandbox' "$ENTITLEMENTS_PATH")" == true ]] || fail "Built app (${ARCH}) is missing its sandbox entitlement."
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.network.client' "$ENTITLEMENTS_PATH")" == true ]] || fail "Built app (${ARCH}) is missing its outgoing network entitlement."
+  GET_TASK_ALLOW="$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.get-task-allow' "$ENTITLEMENTS_PATH" 2>/dev/null || true)"
+  [[ "$GET_TASK_ALLOW" != true ]] || fail "Built app (${ARCH}) enables com.apple.security.get-task-allow; distribution builds must disable debugging entitlements."
+  SIGNATURE_DETAILS="$(codesign --display --arch "$ARCH" --verbose=4 "$APP_PATH" 2>&1)"
+  [[ "$SIGNATURE_DETAILS" =~ flags=[^[:space:]]*runtime ]] || fail "Built app (${ARCH}) does not enable the hardened runtime."
+  if [[ "$SIGNED" == true ]]; then
+    [[ "$SIGNATURE_DETAILS" == *"Authority=${SIGN_IDENTITY}"* ]] || fail "Built app (${ARCH}) is not signed with the requested Developer ID identity."
+    [[ "$SIGNATURE_DETAILS" == *'Timestamp='* ]] || fail "Built app (${ARCH}) is missing a secure signing timestamp."
+  fi
 done
-codesign --verify --deep --strict --verbose=2 "$APP_PATH"
-codesign --display --entitlements :- "$APP_PATH" > "${STAGING_DIR}/entitlements.plist"
-[[ "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.app-sandbox' "${STAGING_DIR}/entitlements.plist")" == true ]] || fail 'Built app is missing its sandbox entitlement.'
-[[ "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.network.client' "${STAGING_DIR}/entitlements.plist")" == true ]] || fail 'Built app is missing its outgoing network entitlement.'
-SIGNATURE_DETAILS="$(codesign --display --verbose=4 "$APP_PATH" 2>&1)"
-[[ "$SIGNATURE_DETAILS" =~ flags=[^[:space:]]*runtime ]] || fail 'Built app does not enable the hardened runtime.'
-if [[ "$SIGNED" == true ]]; then
-  [[ "$SIGNATURE_DETAILS" == *"Authority=${SIGN_IDENTITY}"* ]] || fail 'Built app is not signed with the requested Developer ID identity.'
-  [[ "$SIGNATURE_DETAILS" == *'Timestamp='* ]] || fail 'Built app is missing a secure signing timestamp.'
-fi
 
 notarize() {
   local artifact="$1"
