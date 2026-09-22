@@ -4,7 +4,7 @@ import SwiftUI
 
 struct ComposerView: View {
     @EnvironmentObject private var store: ChatStore
-    @State private var editorHeight: CGFloat = 58
+    @State private var editorHeight: CGFloat = ChatTextEditor.minimumHeight
     @State private var emojiPickerRequest = 0
 
     private let characterLimit = 4_000
@@ -104,6 +104,9 @@ struct ComposerView: View {
 }
 
 private struct ChatTextEditor: NSViewRepresentable {
+    // One 16-point text line plus the 11-point top and bottom insets.
+    static let minimumHeight: CGFloat = 38
+
     @Binding var text: String
     @Binding var height: CGFloat
     var isEnabled: Bool
@@ -133,7 +136,7 @@ private struct ChatTextEditor: NSViewRepresentable {
         editor.autoresizingMask = [.width]
         editor.textContainer?.widthTracksTextView = true
         editor.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
-        editor.minSize = NSSize(width: 0, height: 58)
+        editor.minSize = NSSize(width: 0, height: Self.minimumHeight)
         editor.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         editor.allowsUndo = true
         editor.isAutomaticQuoteSubstitutionEnabled = false
@@ -190,7 +193,7 @@ private struct ChatTextEditor: NSViewRepresentable {
         func updateHeight(_ editor: NSTextView) {
             guard let layoutManager = editor.layoutManager, let container = editor.textContainer else { return }
             layoutManager.ensureLayout(for: container)
-            let newHeight = max(58, min(170, layoutManager.usedRect(for: container).height + 22))
+            let newHeight = max(ChatTextEditor.minimumHeight, min(170, layoutManager.usedRect(for: container).height + 22))
             guard abs(parent.height - newHeight) > 1 else { return }
             DispatchQueue.main.async { [weak self] in self?.parent.height = newHeight }
         }
