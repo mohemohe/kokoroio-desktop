@@ -3,6 +3,7 @@
 
 Start: python3 scripts/mock-server.py
 Tree scenario: python3 scripts/mock-server.py --channel-tree
+Legacy images: python3 scripts/mock-server.py --legacy-images --port 8876
 Sign in: http://127.0.0.1:8765 with the public test token test-token.
 Inspect: GET /test/state with X-Access-Token: test-token.
 Publish: POST /test/publish with {"channel_id":"CHAN00002","content":"Hello"}.
@@ -23,6 +24,7 @@ import threading
 import time
 from urllib.parse import parse_qs, urlsplit
 import uuid
+import zlib
 
 TOKEN = "test-token"
 IDENTIFIER = '{"channel":"ChatChannel"}'
@@ -39,8 +41,34 @@ def profile(identifier, screen_name, display_name):
             "archived": False, "invited_channels_count": 0}
 
 
+def image_png(seed, thumbnail=True):
+    """Generate a recognizable landscape without an image library or remote URL."""
+    width, height = (240, 160) if thumbnail else (960, 640)
+    rows = bytearray()
+    for y in range(height):
+        rows.append(0)  # PNG scanline filter: none.
+        for x in range(width):
+            px, py = x / width, y / height
+            if (px - 0.75) ** 2 + (py - 0.25) ** 2 < 0.011:
+                color = (255, 216, 99)
+            elif py > 0.8 - abs(px - 0.45) * 0.7:
+                color = (48 + seed % 70, 117 + seed % 60, 96)
+            elif py > 0.7 - abs(px - 0.8) * 0.65:
+                color = (81, 101 + seed % 80, 140 + seed % 60)
+            else:
+                color = (75 + int(py * 50), 152 + seed % 50, 226)
+            rows.extend(color)
+
+    def chunk(kind, data):
+        return struct.pack("!I", len(data)) + kind + data + struct.pack("!I", zlib.crc32(kind + data))
+
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack("!IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))
+
+
 class Fixture:
-    def __init__(self, channel_tree=False):
+    def __init__(self, channel_tree=False, legacy_images=False, port=8765):
         self.lock = threading.RLock()
         self.clients = set()
         self.records = []
@@ -50,6 +78,10 @@ class Fixture:
         self.channels = {}
         self.memberships = {}
         self.messages = {}
+        self.legacy_images = legacy_images
+        self.image_origin = f"http://127.0.0.1:{port}"
+        self.images = {}
+        self.message_images = {}
         channels = [
             ("general", "public_channel", "みんなで気軽に話す場所。REST とリアルタイム通信を確認できます。"),
             ("team-private", "private_channel", "非公開チャンネル。別チャンネルからの新着と通知のテスト用。"),
@@ -90,7 +122,20 @@ class Fixture:
                 content = f"{name} の会話 {number}。過去のメッセージもそのまま読めます。"
                 if number == count:
                     content = "ローカルサーバーに接続しました。メッセージを送信してみてください。"
-                self.add_message(channel_id, content, author, published_at=timestamp(start + timedelta(minutes=number)))
+                image_count, legacy_image, nsfw = 0, False, False
+                if legacy_images and index == 1:
+                    cases = {
+                        20: (1, True, False, "100 件以上前の旧形式画像"),
+                        121: (1, True, False, "旧形式画像 1 枚（Hotwire で補完）"),
+                        122: (2, True, False, "旧形式画像 2 枚（Hotwire で補完）"),
+                        123: (1, True, True, "NSFW の旧形式画像（表示操作で確認）"),
+                        124: (1, False, False, "API で解決済みの画像"),
+                    }
+                    if number in cases:
+                        image_count, legacy_image, nsfw, content = cases[number]
+                self.add_message(channel_id, content, author,
+                                 published_at=timestamp(start + timedelta(minutes=number)),
+                                 image_count=image_count, legacy_images=legacy_image, nsfw=nsfw)
             self.memberships[channel_id]["latest_read_message_id"] = self.channels[channel_id]["latest_message_id"] - 2
             self.memberships[channel_id]["unread_count"] = 2
 
@@ -109,7 +154,8 @@ class Fixture:
     def membership(self, channel_id):
         return {**copy.deepcopy(self.memberships[channel_id]), "channel": self.channel(channel_id)}
 
-    def add_message(self, channel_id, content, author, key=None, published_at=None):
+    def add_message(self, channel_id, content, author, key=None, published_at=None,
+                    image_count=0, legacy_images=False, nsfw=False):
         with self.lock:
             if key:
                 existing = next((m for m in self.messages[channel_id] if m["idempotent_key"] == key), None)
@@ -128,12 +174,50 @@ class Fixture:
                 "expand_embed_contents": True, "status": "active", "content": html.escape(content),
                 "html_content": html.escape(content), "plaintext_content": content, "raw_content": content,
                 "embedded_urls": [], "embed_contents": [], "published_at": published_at,
-                "nsfw": False, "channel": self.channel(channel_id), "profile": copy.deepcopy(author),
+                "nsfw": nsfw, "channel": self.channel(channel_id), "profile": copy.deepcopy(author),
             }
+            attachments = []
+            for position in range(image_count):
+                urls = {}
+                for variant in ("full", "thumb"):
+                    path = f"/test/images/{message_id}-{position}-{variant}.png"
+                    self.images[path] = (message_id * 7 + position * 31, variant == "thumb")
+                    urls[variant] = self.image_origin + path
+                attachments.append(urls)
+                data = {"type": "UploadedImage", "content_type": "image/png"}
+                if not legacy_images:
+                    data.update(url=urls["full"], thumbnail_url=urls["thumb"])
+                message["embed_contents"].append({"url": None, "position": position, "data": data})
+            if attachments:
+                self.message_images[message_id] = attachments
             self.messages[channel_id].append(message)
             if author["id"] != self.me["id"]:
                 self.memberships[channel_id]["unread_count"] += 1
             return copy.deepcopy(message), True
+
+    def resume(self, channel_id, after_id):
+        with self.lock:
+            messages = [m for m in self.messages.get(channel_id, []) if m["id"] > after_id][:200] if after_id > 0 else []
+            streams = []
+            for message in messages:
+                message_id = message["id"]
+                content = f'<div class="filtered-text">{message["html_content"]}</div>'
+                attachments = self.message_images.get(message_id, [])
+                if attachments:
+                    content += '<div class="embed-contents"><div class="embed-uploaded-images">'
+                    for attachment in attachments:
+                        link = (f'<a class="embed-uploaded-image-link" href="{html.escape(attachment["full"], quote=True)}" rel="noopener">'
+                                f'<img class="embed-uploaded-image" src="{html.escape(attachment["thumb"], quote=True)}"></a>')
+                        content += f'<div class="nsfw-media">{link}<span class="nsfw-mark"></span></div>' if message["nsfw"] else link
+                    content += '</div></div>'
+                streams.append(
+                    f'<turbo-stream action="append" target="messages"><template>'
+                    f'<div class="talk" id="message_{message_id}" data-channel-hashid="{html.escape(channel_id, quote=True)}">'
+                    f'<div class="message"><div><div id="message_{message_id}_content">{content}'
+                    f'</div></div></div></div></template></turbo-stream>')
+            self.record("resume", channel_id=channel_id, after_id=after_id,
+                        message_ids=[m["id"] for m in messages], count=len(messages))
+            return "".join(streams)
 
     def broadcast(self, event, payload, channel_id=None):
         with self.lock:
@@ -243,6 +327,14 @@ class WebSocket:
                             with FIXTURE.lock:
                                 channel = FIXTURE.channel(channel_id, with_membership=True)
                             self.send_json({"identifier": IDENTIFIER, "message": {"event": "subscribed", "data": channel}})
+                    elif action.get("action") == "resume":
+                        try:
+                            after_id = int(action.get("after_id", 0))
+                        except (TypeError, ValueError):
+                            after_id = 0
+                        markup = FIXTURE.resume(action.get("channel_hashid", ""), after_id)
+                        if markup:
+                            self.send_json({"identifier": IDENTIFIER, "message": markup})
         except (EOFError, OSError, ValueError, json.JSONDecodeError):
             pass
         finally:
@@ -285,6 +377,16 @@ class Handler(BaseHTTPRequestHandler):
         FIXTURE.record("request", method="GET", path=path)
         if path == "/health":
             self.json_response(200, {"status": "ok", "fixture": True})
+            return
+        if path in FIXTURE.images:
+            FIXTURE.record("image_request", path=path, has_access_token="X-Access-Token" in self.headers)
+            body = image_png(*FIXTURE.images[path])
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "public, max-age=3600")
+            self.end_headers()
+            self.wfile.write(body)
             return
         if not self.authorized():
             return
@@ -366,7 +468,17 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(content, str) or not content.strip() or len(content) > 4000:
             self.json_response(400, {"message": "Message must contain 1 to 4000 characters"})
             return
-        message, created = FIXTURE.add_message(channel_id, content, author, key)
+        image_count, legacy_images, nsfw = 0, False, False
+        if path == "/test/publish" and FIXTURE.legacy_images:
+            legacy_images = body.get("legacy_images") is True
+            nsfw = body.get("nsfw") is True
+            try:
+                image_count = max(0, min(4, int(body.get("image_count", 1 if legacy_images else 0))))
+            except (TypeError, ValueError):
+                self.json_response(400, {"message": "Invalid image count"})
+                return
+        message, created = FIXTURE.add_message(channel_id, content, author, key,
+                                              image_count=image_count, legacy_images=legacy_images, nsfw=nsfw)
         if created:
             FIXTURE.broadcast("message_created", message, channel_id)
         self.json_response(201 if created else 200, message)
@@ -407,8 +519,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--channel-tree", action="store_true", help="Include hierarchical channel names")
+    parser.add_argument("--legacy-images", action="store_true", help="Include uploaded images whose URLs require Hotwire resume")
     args = parser.parse_args()
-    FIXTURE = Fixture(channel_tree=args.channel_tree)
+    FIXTURE = Fixture(channel_tree=args.channel_tree, legacy_images=args.legacy_images, port=args.port)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     server.daemon_threads = True
     print(f"kokoro.io fixture: http://127.0.0.1:{args.port}  public test token: {TOKEN}", flush=True)
