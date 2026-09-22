@@ -18,6 +18,24 @@ public enum RealtimeConnectionState: Equatable, Sendable {
     case failed(String)
 }
 
+public enum RealtimeResumeError: LocalizedError, Equatable, Sendable {
+    case invalidChannelID
+    case invalidAfterID
+    case channelNotSubscribed
+    case notConnected
+    case connectionChanged
+
+    public var errorDescription: String? {
+        switch self {
+        case .invalidChannelID: return "チャンネル ID が無効です。"
+        case .invalidAfterID: return "メッセージ ID が無効です。"
+        case .channelNotSubscribed: return "チャンネルを購読していません。"
+        case .notConnected: return "リアルタイム接続が確立されていません。"
+        case .connectionChanged: return "リアルタイム接続が切り替わりました。"
+        }
+    }
+}
+
 /// The JSON protocol used by Rails ActionCable, independently testable without a socket.
 public enum ActionCableProtocol {
     public static let identifier = #"{"channel":"ChatChannel"}"#
@@ -29,6 +47,7 @@ public enum ActionCableProtocol {
         case rejected
         case disconnected(reason: String, reconnect: Bool)
         case event(RealtimeEvent)
+        case html(String)
         case ignored
     }
 
@@ -85,6 +104,15 @@ public enum ActionCableProtocol {
         try actionFrame(["action": "unsubscribe"])
     }
 
+    /// Reuses the Web client's catch-up action to obtain rendered attachment URLs.
+    public static func resumeFrame(channelID: String, afterID: Int) throws -> String {
+        guard !channelID.isEmpty,
+              channelID.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) })
+        else { throw RealtimeResumeError.invalidChannelID }
+        guard afterID > 0 else { throw RealtimeResumeError.invalidAfterID }
+        return try actionFrame(["action": "resume", "channel_hashid": channelID, "after_id": afterID])
+    }
+
     public static func parse(_ data: Data) throws -> Frame {
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return .ignored }
         if let type = object["type"] as? String {
@@ -98,8 +126,9 @@ public enum ActionCableProtocol {
             default: return .ignored
             }
         }
-        guard object["identifier"] as? String == identifier,
-              let message = object["message"] as? [String: Any],
+        guard object["identifier"] as? String == identifier else { return .ignored }
+        if let html = object["message"] as? String { return .html(html) }
+        guard let message = object["message"] as? [String: Any],
               let event = message["event"] as? String,
               let payload = message["data"] else { return .ignored }
         return .event(RealtimeEvent(name: event, payload: try JSONSerialization.data(withJSONObject: payload, options: [.fragmentsAllowed, .sortedKeys])))
@@ -127,6 +156,7 @@ private final class RealtimeSessionDelegate: NSObject, URLSessionTaskDelegate {
 @MainActor
 public final class RealtimeClient {
     public var onEvent: ((RealtimeEvent) -> Void)?
+    public var onHTML: ((String) -> Void)?
     public var onStateChange: ((RealtimeConnectionState) -> Void)?
     public private(set) var state: RealtimeConnectionState = .disconnected {
         didSet { if state != oldValue { onStateChange?(state) } }
@@ -179,6 +209,28 @@ public final class RealtimeClient {
         self.channelIDs = desired
         subscriptionRevision += 1
         synchronizeSubscriptions()
+    }
+
+    public func resumeMessages(channelID: String, afterID: Int) async throws {
+        try Task.checkCancellation()
+        let frame = try ActionCableProtocol.resumeFrame(channelID: channelID, afterID: afterID)
+        guard channelIDs.contains(channelID) else { throw RealtimeResumeError.channelNotSubscribed }
+        guard state == .connected, isSubscribed, let socket else { throw RealtimeResumeError.notConnected }
+        let currentGeneration = generation
+        do {
+            try await socket.send(.string(frame))
+        } catch {
+            guard generation == currentGeneration, self.socket === socket else {
+                throw RealtimeResumeError.connectionChanged
+            }
+            throw error
+        }
+        try Task.checkCancellation()
+        guard generation == currentGeneration, self.socket === socket else {
+            throw RealtimeResumeError.connectionChanged
+        }
+        guard state == .connected, isSubscribed else { throw RealtimeResumeError.notConnected }
+        guard channelIDs.contains(channelID) else { throw RealtimeResumeError.channelNotSubscribed }
     }
 
     public func disconnect() {
@@ -270,6 +322,7 @@ public final class RealtimeClient {
             if reconnect { connectionFailed() }
             else { stopWithFailure(reason == "unauthorized" ? "認証に失敗しました。アクセストークンを確認してください。" : "サーバーによって接続が終了しました。") }
         case .event(let event): onEvent?(event)
+        case .html(let html): onHTML?(html)
         case .ping, .ignored: break
         }
     }

@@ -25,6 +25,29 @@ final class RealtimeTests: XCTestCase {
         XCTAssertEqual(emptyAction["channels"] as? [String], [])
     }
 
+    func testResumeUsesExistingChatChannelWithBoundedCatchUpCursor() throws {
+        let frame = try decode(ActionCableProtocol.resumeFrame(channelID: "AbC123xyz", afterID: 424))
+        XCTAssertEqual(frame["command"] as? String, "message")
+        XCTAssertEqual(frame["identifier"] as? String, ActionCableProtocol.identifier)
+        let action = try decode(XCTUnwrap(frame["data"] as? String))
+        XCTAssertEqual(action["action"] as? String, "resume")
+        XCTAssertEqual(action["channel_hashid"] as? String, "AbC123xyz")
+        XCTAssertEqual(action["after_id"] as? Int, 424)
+    }
+
+    func testResumeRejectsInvalidChannelAndNonpositiveCursor() throws {
+        for channelID in ["", "ABC/123", "ABC 123", "ABC\n123", "チャンネル", "ＡＢＣ123"] {
+            XCTAssertThrowsError(try ActionCableProtocol.resumeFrame(channelID: channelID, afterID: 1)) {
+                XCTAssertEqual($0 as? RealtimeResumeError, .invalidChannelID)
+            }
+        }
+        for afterID in [0, -1, Int.min] {
+            XCTAssertThrowsError(try ActionCableProtocol.resumeFrame(channelID: "ABC123", afterID: afterID)) {
+                XCTAssertEqual($0 as? RealtimeResumeError, .invalidAfterID)
+            }
+        }
+    }
+
     func testParsesServerControlFrames() throws {
         XCTAssertEqual(try parse(["type": "welcome"]), .welcome)
         XCTAssertEqual(try parse(["type": "ping", "message": 1_799_999_999]), .ping)
@@ -50,7 +73,14 @@ final class RealtimeTests: XCTestCase {
         XCTAssertEqual(event.name, "channels_updated")
         XCTAssertEqual(try JSONSerialization.jsonObject(with: event.payload) as? [[String: String]], [["id": "ABC"]])
         XCTAssertEqual(try parse(["identifier": "other", "message": ["event": "message_created", "data": [:]]]), .ignored)
-        XCTAssertEqual(try parse(["identifier": ActionCableProtocol.identifier, "message": "<turbo-stream></turbo-stream>"]), .ignored)
+    }
+
+    func testHTMLIsDeliveredOnlyForTheAuthenticatedChatChannelIdentifier() throws {
+        let html = "<turbo-stream action=\"append\" target=\"messages\"><template><img src=\"https://example.com/image.png\"></template></turbo-stream>"
+        XCTAssertEqual(try parse(["identifier": ActionCableProtocol.identifier, "message": html]), .html(html))
+        XCTAssertEqual(try parse(["identifier": "other", "message": html]), .ignored)
+        XCTAssertEqual(try parse(["message": html]), .ignored)
+        XCTAssertEqual(try parse(["identifier": ActionCableProtocol.identifier, "message": [html]]), .ignored)
     }
 
     func testWebsocketTokenIsHeaderOnlyAndOriginUsesHTTPS() throws {
@@ -83,6 +113,24 @@ final class RealtimeTests: XCTestCase {
         client.disconnect()
         client.reconnect()
         XCTAssertEqual(client.state, .disconnected)
+    }
+
+    @MainActor
+    func testResumeRequiresChannelMembershipAndAConnectedSubscription() async {
+        let client = RealtimeClient()
+        do {
+            try await client.resumeMessages(channelID: "ABC123", afterID: 1)
+            XCTFail("Expected an unsubscribed channel to be rejected")
+        } catch {
+            XCTAssertEqual(error as? RealtimeResumeError, .channelNotSubscribed)
+        }
+        client.updateSubscriptions(channelIDs: ["ABC123"])
+        do {
+            try await client.resumeMessages(channelID: "ABC123", afterID: 1)
+            XCTFail("Expected a disconnected socket to be rejected")
+        } catch {
+            XCTAssertEqual(error as? RealtimeResumeError, .notConnected)
+        }
     }
 
     private func decode(_ value: String) throws -> [String: Any] {

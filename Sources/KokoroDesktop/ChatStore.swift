@@ -41,6 +41,9 @@ final class ChatStore: ObservableObject {
     private var readTasks: [String: Task<Void, Never>] = [:]
     private var activityObserver: NSObjectProtocol?
     private var refreshTask: Task<Void, Never>?
+    private var imageFallback = UploadedImageFallback()
+    private var imageFallbackTask: Task<Void, Never>?
+    private var imageFallbackRequestID: UUID?
 
     init(notifications: NotificationService) {
         self.notifications = notifications
@@ -50,6 +53,7 @@ final class ChatStore: ObservableObject {
             self?.selectChannel(id)
         }
         realtime.onEvent = { [weak self] event in self?.receive(event) }
+        realtime.onHTML = { [weak self] html in self?.receiveImageHTML(html) }
         realtime.onStateChange = { [weak self] state in self?.setConnectionState(state) }
         activityObserver = NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in
@@ -120,7 +124,7 @@ final class ChatStore: ObservableObject {
         selectedChannelID = id
         draft = drafts[id] ?? ""
         selectionID = UUID()
-        messages = cache[id] ?? []
+        showCachedMessages(in: id)
         isAtBottom = true
         isLoadingMore = false
         let selection = selectionID
@@ -132,7 +136,7 @@ final class ChatStore: ObservableObject {
                 let firstPageCount = try await self.synchronizeChannel(id, api: api, session: session)
                 guard self.sessionID == session else { return }
                 guard self.selectionID == selection else { return }
-                self.messages = self.cache[id] ?? []
+                self.showCachedMessages(in: id)
                 self.hasMoreMessages = firstPageCount == 50
                 self.isLoadingMessages = false
                 await self.markSelectedChannelRead()
@@ -157,7 +161,7 @@ final class ChatStore: ObservableObject {
                 guard self.sessionID == session else { return }
                 self.mergeREST(page, channelID: id, startedAt: revision)
                 guard self.selectionID == selection else { return }
-                self.messages = self.cache[id] ?? []
+                self.showCachedMessages(in: id)
                 self.hasMoreMessages = page.count == 50
                 self.isLoadingMore = false
             } catch {
@@ -186,7 +190,7 @@ final class ChatStore: ObservableObject {
                 self.mergeREST([message], channelID: channel.id, startedAt: revision)
                 self.pendingSends[channel.id] = nil
                 if self.selectedChannelID == channel.id {
-                    self.messages = self.cache[channel.id] ?? []
+                    self.showCachedMessages(in: channel.id)
                     if self.draft == originalDraft { self.draft = ""; self.drafts[channel.id] = "" }
                     self.isAtBottom = true
                 } else if self.drafts[channel.id] == originalDraft { self.drafts[channel.id] = "" }
@@ -240,12 +244,16 @@ final class ChatStore: ObservableObject {
                 let updated = try await self.accurateUnreadCounts(memberships, api: api, profileID: self.profile?.id ?? "")
                 guard self.sessionID == session else { return }
                 self.channels = self.normalize(updated)
+                if let pendingChannel = self.imageFallback.pendingChannelID,
+                   !self.channels.contains(where: { $0.id == pendingChannel }) {
+                    self.resetImageFallback()
+                }
                 self.realtime.updateSubscriptions(channelIDs: self.channels.map(\.id))
                 if let id = self.selectedChannelID, self.channels.contains(where: { $0.id == id }) {
                     _ = try await self.synchronizeChannel(id, api: api, session: session)
                     guard self.sessionID == session else { return }
                     if self.selectedChannelID == id {
-                        self.messages = self.cache[id] ?? []
+                        self.showCachedMessages(in: id)
                         await self.markSelectedChannelRead()
                     }
                 } else if let first = self.channels.first { self.selectChannel(first.id) }
@@ -284,6 +292,50 @@ final class ChatStore: ObservableObject {
         cache[channelID] = TimelineRules.merge(cache[channelID] ?? [], with: eligible)
     }
 
+    private func showCachedMessages(in channelID: String) {
+        messages = (cache[channelID] ?? []).map { imageFallback.applying(to: $0) }
+        resolveMissingImages()
+    }
+
+    private func resolveMissingImages() {
+        guard isConnected, imageFallbackTask == nil, let id = selectedChannelID,
+              let request = imageFallback.nextRequest(in: cache[id] ?? []) else { return }
+        let session = sessionID
+        let requestID = UUID()
+        imageFallbackRequestID = requestID
+        imageFallbackTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await self.realtime.resumeMessages(channelID: request.channelID, afterID: request.afterID)
+                try await Task.sleep(for: .seconds(15))
+            } catch {
+                if Task.isCancelled { return }
+            }
+            guard self.sessionID == session, self.imageFallbackRequestID == requestID else { return }
+            self.imageFallback.failPendingRequest()
+            self.imageFallbackTask = nil
+            self.imageFallbackRequestID = nil
+        }
+    }
+
+    private func receiveImageHTML(_ html: String) {
+        guard let channelID = imageFallback.pendingChannelID, let baseURL = credential?.baseURL,
+              channels.contains(where: { $0.id == channelID }) else { return }
+        let records = HotwireImageParser.parse(html, baseURL: baseURL)
+        guard imageFallback.accept(records, currentMessages: cache[channelID] ?? []) else { return }
+        imageFallbackTask?.cancel()
+        imageFallbackTask = nil
+        imageFallbackRequestID = nil
+        if let selectedChannelID { showCachedMessages(in: selectedChannelID) }
+    }
+
+    private func resetImageFallback() {
+        imageFallbackTask?.cancel()
+        imageFallbackTask = nil
+        imageFallbackRequestID = nil
+        imageFallback.reset()
+    }
+
     /// The server's REST read endpoint does not reset unread_count. Count after its cursor.
     private func accurateUnreadCounts(_ incoming: [Channel], api: APIClient, profileID: String) async throws -> [Channel] {
         var output = incoming
@@ -317,9 +369,10 @@ final class ChatStore: ObservableObject {
                 guard let index = channels.firstIndex(where: { $0.id == id }) else { refresh(); return }
                 eventRevision += 1
                 messageRevisions[message.id] = eventRevision
+                imageFallback.invalidate(messageID: message.id)
                 let known = cache[id]?.contains(where: { $0.id == message.id }) == true
                 cache[id] = TimelineRules.merge(cache[id] ?? [], with: [message])
-                if selectedChannelID == id { messages = cache[id] ?? [] }
+                if selectedChannelID == id { showCachedMessages(in: id) }
                 channels[index].latestMessageID = max(channels[index].latestMessageID ?? 0, message.id)
                 let isNew = event.name == "message_created" && !known && seenEvents.insert(message.id).inserted
                 let isReading = selectedChannelID == id && isAtBottom && NSApp.isActive
@@ -355,8 +408,9 @@ final class ChatStore: ObservableObject {
 
     private func setConnectionState(_ state: RealtimeConnectionState) {
         isConnected = false
+        if state != .connected { resetImageFallback() }
         switch state {
-        case .connected: isConnected = true; connectionLabel = "接続済み"; refresh()
+        case .connected: isConnected = true; connectionLabel = "接続済み"; refresh(); resolveMissingImages()
         case .connecting: connectionLabel = "接続中…"
         case .reconnecting: connectionLabel = "再接続中…"
         case .disconnected: connectionLabel = "オフライン"
@@ -373,6 +427,7 @@ final class ChatStore: ObservableObject {
     }
 
     private func resetSession() {
+        resetImageFallback()
         sessionID = UUID(); selectionID = UUID(); signInAttemptID = UUID(); isSigningIn = false
         realtime.disconnect()
         notifications.resetSession()
