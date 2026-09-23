@@ -598,7 +598,7 @@ final class ChatStore: ObservableObject {
                     if message.profile.id != profile?.id && message.id > (channels[index].membership?.latestReadMessageID ?? 0) {
                         channels[index].membership?.unreadCount += 1
                     }
-                    if TimelineRules.shouldNotify(message: message, channel: channels[index], currentProfileID: profile?.id, isReadingChannel: isReading) {
+                    if TimelineRules.shouldNotify(message: message, channel: channels[index], currentProfileID: profile?.id, isReadingChannel: isReading, target: notifications.target) {
                         notifications.schedule(messageID: message.id, channelID: id, channelName: channels[index].name, sender: message.displayName, body: message.text)
                     }
                 }

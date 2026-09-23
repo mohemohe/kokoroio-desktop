@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import KokoroCore
 import UserNotifications
 
 @MainActor
@@ -9,6 +10,9 @@ final class NotificationService: NSObject, ObservableObject, UNUserNotificationC
     }
     @Published var soundEnabled: Bool {
         didSet { defaults.set(soundEnabled, forKey: Keys.soundEnabled) }
+    }
+    @Published var target: DesktopNotificationTarget {
+        didSet { defaults.set(target.rawValue, forKey: Keys.target) }
     }
     @Published private(set) var authorizationStatus: UNAuthorizationStatus = .notDetermined
     @Published private(set) var lastError: String?
@@ -24,6 +28,7 @@ final class NotificationService: NSObject, ObservableObject, UNUserNotificationC
     private enum Keys {
         static let enabled = "notifications.enabled"
         static let soundEnabled = "notifications.soundEnabled"
+        static let target = "notifications.target"
     }
 
     init(defaults: UserDefaults = .standard, center: UNUserNotificationCenter = .current()) {
@@ -32,6 +37,7 @@ final class NotificationService: NSObject, ObservableObject, UNUserNotificationC
         defaults.register(defaults: [Keys.enabled: true, Keys.soundEnabled: true])
         enabled = defaults.bool(forKey: Keys.enabled)
         soundEnabled = defaults.bool(forKey: Keys.soundEnabled)
+        target = DesktopNotificationTarget(rawValue: defaults.string(forKey: Keys.target) ?? "") ?? .mentionsAndDirectMessages
         super.init()
         center.delegate = self
         Task { await refreshAuthorizationStatus() }

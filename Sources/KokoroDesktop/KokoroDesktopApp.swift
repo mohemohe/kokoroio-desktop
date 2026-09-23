@@ -1,4 +1,5 @@
 import AppKit
+import KokoroCore
 import SwiftUI
 
 @main
@@ -93,6 +94,11 @@ private struct SettingsView: View {
         Form {
             Section("通知") {
                 Toggle("システム通知を表示", isOn: $notifications.enabled)
+                Picker("通知の対象", selection: $notifications.target) {
+                    Text("メンションとダイレクトメッセージ").tag(DesktopNotificationTarget.mentionsAndDirectMessages)
+                    Text("全てのメッセージ").tag(DesktopNotificationTarget.allMessages)
+                }
+                .disabled(!notifications.enabled)
                 Toggle("通知音を鳴らす", isOn: $notifications.soundEnabled)
                     .disabled(!notifications.enabled)
                 if notifications.isAuthorized {
@@ -101,7 +107,7 @@ private struct SettingsView: View {
                     Button("macOSの通知を許可する") { Task { await notifications.requestAuthorization() } }
                     Button("システム設定を開く") { openURL(URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension")!) }
                 }
-                Text("チャンネルの通知設定に従ってお知らせします。表示中の会話と自分の投稿は通知しません。アプリの起動中に動作します。")
+                Text("ミュート中のチャンネル、表示中の会話、自分の投稿は通知しません。アプリの起動中に動作します。")
                     .font(.caption).foregroundStyle(.secondary)
                 if let error = notifications.lastError { Text(error).foregroundStyle(.red) }
             }

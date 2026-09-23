@@ -46,48 +46,63 @@ final class TimelineRulesTests: XCTestCase {
     func testOwnMessagesNeverNotifyIncludingDirectMessagesAndMentions() {
         let direct = channel(policy: "all_messages", direct: true)
         let own = message(50, content: "<@MYPROF001|alice>", profileID: currentProfileID, channel: direct)
-        XCTAssertFalse(shouldNotify(own, in: direct))
+        for target in DesktopNotificationTarget.allCases {
+            XCTAssertFalse(shouldNotify(own, in: direct, target: target))
+        }
     }
 
     func testActiveVisibleConversationSuppressesNotificationIncludingDirectMessages() {
         for direct in [false, true] {
             let room = channel(policy: "all_messages", direct: direct)
-            XCTAssertFalse(shouldNotify(message(51, channel: room), in: room, isReading: true))
-            XCTAssertTrue(shouldNotify(message(51, channel: room), in: room, isReading: false))
+            for target in DesktopNotificationTarget.allCases {
+                XCTAssertFalse(shouldNotify(message(51, channel: room), in: room, isReading: true, target: target))
+            }
         }
     }
 
-    func testMentionPolicyMatchesRawProfileIDInsteadOfRenderedName() {
-        let room = channel(policy: "only_mentions")
+    func testMentionsAndDirectMessagesTargetMatchesRawProfileIDInsteadOfRenderedName() {
+        let room = channel(policy: "all_messages")
         var mention = message(60, content: "Hello <@MYPROF001|old_screen_name>", channel: room)
         mention.plaintextContent = "Hello @old_screen_name"
         XCTAssertTrue(shouldNotify(mention, in: room))
+        XCTAssertFalse(shouldNotify(message(59, channel: room), in: room))
         XCTAssertFalse(shouldNotify(message(61, content: "Hello @alice", channel: room), in: room))
         XCTAssertFalse(shouldNotify(message(62, content: "<@OTHER0001|alice>", channel: room), in: room))
         XCTAssertFalse(shouldNotify(message(63, content: "<@MYPROF001X|alice>", channel: room), in: room))
     }
 
     func testMalformedMentionDoesNotNotify() {
-        let room = channel(policy: "only_mentions")
+        let room = channel(policy: "all_messages")
         for content in ["<@MYPROF001|alice", "<@MYPROF001|>", "<@MYPROF001|not a username>"] {
             XCTAssertFalse(shouldNotify(message(64, content: content, channel: room), in: room), content)
         }
     }
 
-    func testDirectMessageNotifiesEvenWhenChannelPolicyIsNothing() {
+    func testDirectMessageNotifiesForBothTargets() {
         let room = channel(policy: "nothing", direct: true)
-        XCTAssertTrue(shouldNotify(message(70, channel: room), in: room))
-    }
-
-    func testMuteSuppressesAllMessagesMentionsAndDirectMessages() {
-        for room in [channel(policy: "all_messages", muted: true), channel(policy: "only_mentions", muted: true), channel(policy: "nothing", direct: true, muted: true)] {
-            XCTAssertFalse(shouldNotify(message(71, content: "<@MYPROF001|alice>", channel: room), in: room))
+        for target in DesktopNotificationTarget.allCases {
+            XCTAssertTrue(shouldNotify(message(70, channel: room), in: room, target: target))
         }
     }
 
-    func testNothingPolicySuppressesPublicChannelMentions() {
+    func testAllMessagesTargetIncludesOrdinaryChannelMessagesRegardlessOfChannelPolicy() {
+        for policy in ["only_mentions", "nothing", "all_messages"] {
+            let room = channel(policy: policy)
+            XCTAssertTrue(shouldNotify(message(70, channel: room), in: room, target: .allMessages))
+        }
+    }
+
+    func testMuteSuppressesBothTargets() {
+        for room in [channel(policy: "all_messages", muted: true), channel(policy: "only_mentions", muted: true), channel(policy: "nothing", direct: true, muted: true)] {
+            for target in DesktopNotificationTarget.allCases {
+                XCTAssertFalse(shouldNotify(message(71, content: "<@MYPROF001|alice>", channel: room), in: room, target: target))
+            }
+        }
+    }
+
+    func testMentionTargetIncludesMentionWhenChannelPolicyIsNothing() {
         let room = channel(policy: "nothing")
-        XCTAssertFalse(shouldNotify(message(72, content: "<@MYPROF001|alice>", channel: room), in: room))
+        XCTAssertTrue(shouldNotify(message(72, content: "<@MYPROF001|alice>", channel: room), in: room))
     }
 
     func testDeletedMessagesNeverNotify() {
@@ -95,12 +110,14 @@ final class TimelineRulesTests: XCTestCase {
         for status in ["deleted_by_publisher", "deleted_by_another_member"] {
             var deleted = message(73, channel: room)
             deleted.status = status
-            XCTAssertFalse(shouldNotify(deleted, in: room))
+            for target in DesktopNotificationTarget.allCases {
+                XCTAssertFalse(shouldNotify(deleted, in: room, target: target))
+            }
         }
     }
 
-    private func shouldNotify(_ message: Message, in channel: Channel, isReading: Bool = false) -> Bool {
-        TimelineRules.shouldNotify(message: message, channel: channel, currentProfileID: currentProfileID, isReadingChannel: isReading)
+    private func shouldNotify(_ message: Message, in channel: Channel, isReading: Bool = false, target: DesktopNotificationTarget = .mentionsAndDirectMessages) -> Bool {
+        TimelineRules.shouldNotify(message: message, channel: channel, currentProfileID: currentProfileID, isReadingChannel: isReading, target: target)
     }
 
     private func channel(policy: String = "all_messages", direct: Bool = false, muted: Bool = false) -> Channel {
