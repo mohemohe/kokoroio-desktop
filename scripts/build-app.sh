@@ -3,7 +3,7 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIGURATION="${CONFIGURATION:-Debug}"
-DERIVED_DATA_PATH="${DERIVED_DATA_PATH:-${PROJECT_ROOT}/.build/xcode}"
+DERIVED_DATA_PATH="${DERIVED_DATA_PATH:-${PROJECT_ROOT}/build}"
 APP_PATH="${DERIVED_DATA_PATH}/Build/Products/${CONFIGURATION}/KokoroDesktop.app"
 XCODEBUILD_ARGS=(
   -project "${PROJECT_ROOT}/KokoroDesktop.xcodeproj"
