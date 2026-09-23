@@ -33,7 +33,7 @@ xcodebuild \
 open .build/xcode/Build/Products/Debug/KokoroDesktop.app
 ```
 
-Release ビルドは `CONFIGURATION=Release ./scripts/build-app.sh` で作成できます。GitHub Actions での Developer ID 署名・公証・配布手順は [リリース手順](docs/releasing.md) を参照してください。
+Release ビルドは `CONFIGURATION=Release ./scripts/build-app.sh` で作成できます。生成先は `build/Release/KokoroDesktop.app` です。スクリプトは依存パッケージとアプリのビルド成果物の出力先をそろえます。`xcodebuild -configuration Release` を直接実行する場合は、リポジトリのルートで `CONFIGURATION_BUILD_DIR="$PWD/build/Release"` を追加してください。GitHub Actions での Developer ID 署名・公証・配布手順は [リリース手順](docs/releasing.md) を参照してください。
 
 システム通知には正規のアプリバンドルが必要なため、起動には上記の `.app` を使用します。
 
