@@ -9,6 +9,7 @@ enum KChatPalette {
 struct WorkspaceView: View {
     @EnvironmentObject private var store: ChatStore
     @Environment(\.colorScheme) private var colorScheme
+    @FocusState private var isSearchFocused: Bool
 
     private var contentAccent: Color {
         colorScheme == .dark ? Color(red: 0.77, green: 0.65, blue: 0.96) : KChatPalette.accent
@@ -185,6 +186,7 @@ struct WorkspaceView: View {
                 channelHeader(channel)
                 if let error = store.errorMessage { errorBanner(error) }
                 ChatTimelineView(channel: channel)
+                    .id(store.isShowingSearchResults ? "search" : "timeline")
                 Divider().opacity(0.5)
                 ComposerView()
             } else {
@@ -221,22 +223,61 @@ struct WorkspaceView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            Spacer()
-            Button { store.refresh() } label: {
-                Image(systemName: "arrow.clockwise")
+            Spacer(minLength: 8)
+            if store.isSearchOpen {
+                channelSearchField
+            } else {
+                Button {
+                    store.openSearch()
+                    isSearchFocused = true
+                } label: {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 13))
+                        .frame(width: 30, height: 30)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("チャンネル内を検索")
+                .accessibilityLabel("チャンネル内を検索")
+            }
+            Button {
+                if store.isSearchOpen { store.closeSearch(); isSearchFocused = false }
+                else { store.refresh() }
+            } label: {
+                Image(systemName: store.isSearchOpen ? "xmark" : "arrow.clockwise")
                     .font(.system(size: 13))
                     .frame(width: 30, height: 30)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
-            .help("最新のメッセージを取得")
-            .accessibilityLabel("最新のメッセージを取得")
+            .help(store.isSearchOpen ? "検索を閉じる" : "最新のメッセージを取得")
+            .accessibilityLabel(store.isSearchOpen ? "検索を閉じる" : "最新のメッセージを取得")
         }
         .padding(.horizontal, 25)
         .padding(.vertical, 17)
         .background(Color(nsColor: .textBackgroundColor))
         .overlay(alignment: .bottom) { Divider() }
+    }
+
+    private var channelSearchField: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+            TextField("このチャンネルのメッセージを検索", text: $store.searchQuery)
+                .textFieldStyle(.plain)
+                .focused($isSearchFocused)
+                .onSubmit { store.searchSelectedChannel() }
+                .accessibilityLabel("このチャンネルのメッセージを検索")
+            Button("検索") { store.searchSelectedChannel() }
+                .disabled(store.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).count < 2)
+                .help("2文字以上入力してください。")
+        }
+        .font(.system(size: 12))
+        .padding(.horizontal, 10)
+        .frame(minWidth: 150, idealWidth: 280, maxWidth: 360, minHeight: 30)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 7))
     }
 
     private func errorBanner(_ error: String) -> some View {
@@ -280,20 +321,49 @@ private struct ChatTimelineView: View {
     @State private var didInitialScroll = false
     @State private var bottomFrame = CGRect.null
     private let bottomAnchor = "timeline-bottom"
+    private var displayedMessages: [Message] { store.displayedMessages }
 
     var body: some View {
         ScrollViewReader { proxy in
             GeometryReader { geometry in
                 ScrollView {
                     LazyVStack(spacing: 0) {
-                        if store.isLoadingMessages && store.messages.isEmpty {
+                        if store.isShowingSearchResults && store.isSearching {
+                            ProgressView("検索中…")
+                                .font(.system(size: 12))
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 80)
+                        } else if store.isShowingSearchResults, let error = store.searchError {
+                            ContentUnavailableView {
+                                Label("検索できませんでした", systemImage: "exclamationmark.magnifyingglass")
+                            } description: {
+                                Text(error)
+                            } actions: {
+                                Button("再試行") { store.searchSelectedChannel() }
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 60)
+                        } else if store.isShowingSearchResults && displayedMessages.isEmpty {
+                            ContentUnavailableView.search
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 60)
+                        } else if !store.isShowingSearchResults && store.isLoadingMessages && store.messages.isEmpty {
                             ProgressView("メッセージを読み込み中…")
                                 .font(.system(size: 12))
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 80)
                         } else {
-                            historyHeader
-                            ForEach(Array(store.messages.enumerated()), id: \.element.id) { index, message in
+                            if store.isShowingSearchResults {
+                                Text("検索結果: \(displayedMessages.count) 件")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.horizontal, 26)
+                                    .padding(.vertical, 14)
+                            } else {
+                                historyHeader
+                            }
+                            ForEach(Array(displayedMessages.enumerated()), id: \.element.id) { index, message in
                                 if startsDay(at: index) { daySeparator(message.publishedAt) }
                                 MessageRow(message: message, isGrouped: groupsWithPrevious(at: index))
                                     .id(message.id)
@@ -314,25 +384,26 @@ private struct ChatTimelineView: View {
                 }
                 .onPreferenceChange(TimelineBottomPreference.self) { bottom in
                     bottomFrame = bottom
-                    if #unavailable(macOS 15) { updateBottomState(bottom, in: geometry.frame(in: .global)) }
+                    if #unavailable(macOS 15), !store.isShowingSearchResults { updateBottomState(bottom, in: geometry.frame(in: .global)) }
                 }
                 .onChange(of: geometry.frame(in: .global)) { _, viewport in
-                    if #unavailable(macOS 15) { updateBottomState(bottomFrame, in: viewport) }
+                    if #unavailable(macOS 15), !store.isShowingSearchResults { updateBottomState(bottomFrame, in: viewport) }
                 }
-                .modifier(TimelineScrollTracking { atBottom in
+                .modifier(TimelineScrollTracking(isSearch: store.isShowingSearchResults) { atBottom in
+                    guard !store.isShowingSearchResults else { return }
                     store.isAtBottom = atBottom
                     if atBottom { Task { await store.markSelectedChannelRead() } }
                 })
                 .onAppear {
-                    if !store.messages.isEmpty { scrollToLatest(proxy, animated: false) }
+                    if !store.isShowingSearchResults && !store.messages.isEmpty { scrollToLatest(proxy, animated: false) }
                 }
                 .onChange(of: store.selectedChannelID) { _, _ in
                     didInitialScroll = false
                     earlierAnchor = nil
                     store.isAtBottom = true
                 }
-                .onChange(of: store.messages.last?.id) { old, new in
-                    guard new != nil else { return }
+                .onChange(of: store.displayedMessages.last?.id) { old, new in
+                    guard !store.isShowingSearchResults, new != nil else { return }
                     let isOwnMessage = store.messages.last?.profile.id == store.profile?.id
                     if !didInitialScroll || old == nil || store.isAtBottom || isOwnMessage {
                         scrollToLatest(proxy, animated: didInitialScroll)
@@ -347,7 +418,7 @@ private struct ChatTimelineView: View {
                     }
                 }
                 .overlay(alignment: .bottom) {
-                    if !store.isAtBottom && !store.messages.isEmpty && !store.isLoadingMessages {
+                    if !store.isShowingSearchResults && !store.isAtBottom && !store.messages.isEmpty && !store.isLoadingMessages {
                         Button {
                             scrollToLatest(proxy, animated: true)
                         } label: {
@@ -432,14 +503,14 @@ private struct ChatTimelineView: View {
     }
 
     private func startsDay(at index: Int) -> Bool {
-        index == 0 || !Calendar.current.isDate(store.messages[index - 1].publishedAt,
-                                             inSameDayAs: store.messages[index].publishedAt)
+        index == 0 || !Calendar.current.isDate(displayedMessages[index - 1].publishedAt,
+                                             inSameDayAs: displayedMessages[index].publishedAt)
     }
 
     private func groupsWithPrevious(at index: Int) -> Bool {
         guard index > 0, !startsDay(at: index) else { return false }
-        let previous = store.messages[index - 1]
-        let current = store.messages[index]
+        let previous = displayedMessages[index - 1]
+        let current = displayedMessages[index]
         guard !previous.isDeleted, !current.isDeleted else { return false }
         return previous.profile.id == current.profile.id
             && current.publishedAt.timeIntervalSince(previous.publishedAt) < 300
@@ -474,15 +545,16 @@ private struct TimelineBottomPreference: PreferenceKey {
 }
 
 private struct TimelineScrollTracking: ViewModifier {
+    let isSearch: Bool
     let changed: (Bool) -> Void
     @ViewBuilder func body(content: Content) -> some View {
         if #available(macOS 15, *) {
-            content.defaultScrollAnchor(.bottom, for: .initialOffset)
+            content.defaultScrollAnchor(isSearch ? .top : .bottom, for: .initialOffset)
                 .onScrollGeometryChange(for: Bool.self) { geometry in
                 geometry.contentOffset.y + geometry.containerSize.height >= geometry.contentSize.height - 24
             } action: { _, atBottom in changed(atBottom) }
         } else {
-            content.defaultScrollAnchor(.bottom)
+            content.defaultScrollAnchor(isSearch ? .top : .bottom)
         }
     }
 }

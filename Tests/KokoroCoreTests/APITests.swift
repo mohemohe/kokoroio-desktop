@@ -70,6 +70,24 @@ final class APITests: XCTestCase {
         XCTAssertEqual(messages[0].publishedAt.timeIntervalSince1970, 1790039100, accuracy: 1)
     }
 
+    func testChannelSearchUsesEncodedQueryAndDecodesMessages() async throws {
+        APIURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/prefix/api/v1/channels/CHANNEL01/messages/search")
+            let items = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems
+            XCTAssertEqual(items, [URLQueryItem(name: "query", value: "日本語 test & more")])
+            XCTAssertEqual(request.value(forHTTPHeaderField: "X-Access-Token"), self.token)
+            return (200, Data("[\(Self.message)]".utf8))
+        }
+        let results = try await client.searchMessages(channelID: "CHANNEL01", query: "日本語 test & more")
+        XCTAssertEqual(results.map(\.id), [87])
+    }
+
+    func testChannelSearchAcceptsEmptyResults() async throws {
+        APIURLProtocol.handler = { _ in (200, Data("[]".utf8)) }
+        let empty = try await client.searchMessages(channelID: "CHANNEL01", query: "missing")
+        XCTAssertTrue(empty.isEmpty)
+    }
+
     func testSendMessageUsesJSONBodyWithLowercaseIdempotencyKey() async throws {
         APIURLProtocol.handler = { request in
             XCTAssertEqual(request.httpMethod, "POST")

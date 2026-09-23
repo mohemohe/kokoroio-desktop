@@ -67,6 +67,16 @@ public final class APIClient: @unchecked Sendable {
         return try await request(path: ["channels", channelID, "messages"], query: query)
     }
 
+    /// Search messages within one channel. The search route uses the same message
+    /// representation as the timeline endpoint.
+    public func searchMessages(channelID: String, query: String) async throws -> [Message] {
+        try validateID(channelID)
+        return try await request(
+            path: ["channels", channelID, "messages", "search"],
+            query: [URLQueryItem(name: "query", value: query)]
+        )
+    }
+
     /// REST membership unread_count is not reset when its read cursor is updated.
     /// Count the actual messages beyond that cursor, paging backwards because the API
     /// returns IDs in descending order even when using an `after_id` lower bound.

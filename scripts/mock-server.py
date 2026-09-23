@@ -419,10 +419,21 @@ class Handler(BaseHTTPRequestHandler):
                          "memberships": [FIXTURE.membership(c) for c in FIXTURE.channels]}
             else:
                 parts = path.strip("/").split("/")
-                if len(parts) != 5 or parts[:3] != ["api", "v1", "channels"] or parts[4] != "messages" or parts[3] not in FIXTURE.channels:
+                is_search = len(parts) == 6 and parts[5] == "search"
+                if (len(parts) != (6 if is_search else 5) or parts[:3] != ["api", "v1", "channels"]
+                        or parts[4] != "messages" or parts[3] not in FIXTURE.channels):
                     self.json_response(404, {"message": "Not found"})
                     return
                 query = parse_qs(parsed.query)
+                if is_search:
+                    needle = query.get("query", [""])[0].strip().casefold()
+                    if len(needle) < 2:
+                        self.json_response(400, {"message": "Query must be at least 2 characters"})
+                        return
+                    value = [copy.deepcopy(m) for m in reversed(FIXTURE.messages[parts[3]])
+                             if needle in m["plaintext_content"].casefold()]
+                    self.json_response(200, value)
+                    return
                 try:
                     limit = min(1000, max(1, int(query.get("limit", [50])[0])))
                     before = int(query.get("before_id", [2**63])[0])

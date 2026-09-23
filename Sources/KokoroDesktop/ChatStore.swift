@@ -14,6 +14,11 @@ final class ChatStore: ObservableObject {
     @Published var errorMessage: String?
     @Published var draft = ""
     @Published var channelSearch = ""
+    @Published var isSearchOpen = false
+    @Published var searchQuery = ""
+    @Published private(set) var searchResults: [Message]?
+    @Published private(set) var isSearching = false
+    @Published private(set) var searchError: String?
     @Published var profile: Profile?
     @Published var connectionLabel = "未接続"
     @Published var isConnected = false
@@ -42,6 +47,8 @@ final class ChatStore: ObservableObject {
     private var readTasks: [String: Task<Void, Never>] = [:]
     private var activityObserver: NSObjectProtocol?
     private var refreshTask: Task<Void, Never>?
+    private var searchTask: Task<Void, Never>?
+    private var searchRequestID = UUID()
     private var imageFallback = UploadedImageFallback()
     private var imageFallbackTask: Task<Void, Never>?
     private var imageFallbackRequestID: UUID?
@@ -66,6 +73,8 @@ final class ChatStore: ObservableObject {
     }
 
     var selectedChannel: Channel? { channels.first { $0.id == selectedChannelID } }
+    var isShowingSearchResults: Bool { searchResults != nil }
+    var displayedMessages: [Message] { searchResults ?? messages }
     var filteredChannels: [Channel] {
         channels.filter { channel in
             (!unreadOnly || channel.unreadCount > 0) &&
@@ -127,6 +136,7 @@ final class ChatStore: ObservableObject {
 
     func selectChannel(_ id: String) {
         guard channels.contains(where: { $0.id == id }) else { return }
+        closeSearch()
         if let previous = selectedChannelID { drafts[previous] = draft }
         selectedChannelID = id
         if let credential, let profile {
@@ -160,6 +170,49 @@ final class ChatStore: ObservableObject {
 
     private func selectionKey(server: URL, profileID: String) -> String {
         "selectedChannel.\(server.absoluteString).\(profileID)"
+    }
+
+    func openSearch() {
+        isSearchOpen = true
+    }
+
+    func closeSearch() {
+        searchTask?.cancel()
+        searchTask = nil
+        searchRequestID = UUID()
+        isSearchOpen = false
+        searchQuery = ""
+        searchResults = nil
+        isSearching = false
+        searchError = nil
+    }
+
+    func searchSelectedChannel() {
+        let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard query.count >= 2, let channelID = selectedChannelID, let api = client else { return }
+        searchTask?.cancel()
+        let requestID = UUID()
+        searchRequestID = requestID
+        let session = sessionID
+        searchResults = []
+        searchError = nil
+        isSearching = true
+        searchTask = Task { [weak self] in
+            do {
+                let found = try await api.searchMessages(channelID: channelID, query: query)
+                guard let self, self.sessionID == session, self.searchRequestID == requestID,
+                      self.selectedChannelID == channelID, self.isSearchOpen else { return }
+                self.searchResults = found.sorted { $0.id < $1.id }
+                self.isSearching = false
+                self.searchTask = nil
+            } catch {
+                guard let self, self.sessionID == session, self.searchRequestID == requestID,
+                      self.selectedChannelID == channelID, self.isSearchOpen, !Task.isCancelled else { return }
+                self.isSearching = false
+                self.searchError = error.localizedDescription
+                self.searchTask = nil
+            }
+        }
     }
 
     func loadOlderMessages() {
@@ -219,7 +272,7 @@ final class ChatStore: ObservableObject {
     }
 
     func markSelectedChannelRead() async {
-        guard NSApp.isActive, isAtBottom, let api = client, let channel = selectedChannel,
+        guard NSApp.isActive, isAtBottom, !isShowingSearchResults, let api = client, let channel = selectedChannel,
               let membership = channel.membership, let latest = messages.last?.id,
               latest > membership.latestReadMessageID, readTasks[channel.id] == nil else { return }
         let session = sessionID
@@ -389,7 +442,7 @@ final class ChatStore: ObservableObject {
                 if selectedChannelID == id { showCachedMessages(in: id) }
                 channels[index].latestMessageID = max(channels[index].latestMessageID ?? 0, message.id)
                 let isNew = event.name == "message_created" && !known && seenEvents.insert(message.id).inserted
-                let isReading = selectedChannelID == id && isAtBottom && NSApp.isActive
+                let isReading = selectedChannelID == id && !isShowingSearchResults && isAtBottom && NSApp.isActive
                 if isNew {
                     if message.profile.id != profile?.id && message.id > (channels[index].membership?.latestReadMessageID ?? 0) {
                         channels[index].membership?.unreadCount += 1
@@ -441,6 +494,7 @@ final class ChatStore: ObservableObject {
     }
 
     private func resetSession() {
+        closeSearch()
         resetImageFallback()
         sessionID = UUID(); selectionID = UUID(); signInAttemptID = UUID(); isSigningIn = false
         realtime.disconnect()
