@@ -67,6 +67,7 @@ private struct ChannelTreeRows: View {
                 }
                 .padding(.vertical, 4)
                 .tag(channel.id)
+                .id(channel.id)
                 .help(channel.name)
                 .accessibilityLabel(channel.name + unreadDescription(channel.unreadCount))
             } else {

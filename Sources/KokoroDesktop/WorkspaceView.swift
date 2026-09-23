@@ -76,27 +76,37 @@ struct WorkspaceView: View {
                 .padding(.horizontal, 20)
                 .padding(.vertical, 17)
 
-            List(selection: Binding(
-                get: { store.selectedChannelID },
-                set: { if let id = $0 { store.selectChannel(id) } }
-            )) {
-                ChannelSidebarSection(title: "チャンネル", channels: publicChannels, icon: "number")
-                ChannelSidebarSection(title: "プライベート", channels: privateChannels, icon: "lock.fill")
-                ChannelSidebarSection(title: "ダイレクトメッセージ", channels: directChannels, icon: "bubble.left")
-                if store.filteredChannels.isEmpty {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(store.unreadOnly ? "未読はありません" : "チャンネルが見つかりません")
-                            .font(.system(size: 12, weight: .medium))
-                        Text(store.unreadOnly ? "すべての会話を確認しました。" : "検索条件を変更してください。")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
+            ScrollViewReader { proxy in
+                List(selection: Binding(
+                    get: { store.selectedChannelID },
+                    set: { if let id = $0 { store.selectChannel(id) } }
+                )) {
+                    ChannelSidebarSection(title: "チャンネル", channels: publicChannels, icon: "number")
+                    ChannelSidebarSection(title: "プライベート", channels: privateChannels, icon: "lock.fill")
+                    ChannelSidebarSection(title: "ダイレクトメッセージ", channels: directChannels, icon: "bubble.left")
+                    if store.filteredChannels.isEmpty {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(store.unreadOnly ? "未読はありません" : "チャンネルが見つかりません")
+                                .font(.system(size: 12, weight: .medium))
+                            Text(store.unreadOnly ? "すべての会話を確認しました。" : "検索条件を変更してください。")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        }
+                        .listRowSeparator(.hidden)
                     }
-                    .listRowSeparator(.hidden)
+                }
+                .listStyle(.sidebar)
+                .scrollContentBackground(.hidden)
+                .scrollIndicators(.hidden)
+                .task(id: store.selectedChannelID) {
+                    guard let id = store.selectedChannelID else { return }
+                    // Give the channel tree a layout pass to expand the selected row.
+                    await Task.yield()
+                    guard !Task.isCancelled, store.selectedChannelID == id,
+                          store.filteredChannels.contains(where: { $0.id == id }) else { return }
+                    proxy.scrollTo(id)
                 }
             }
-            .listStyle(.sidebar)
-            .scrollContentBackground(.hidden)
-            .scrollIndicators(.hidden)
             .frame(maxHeight: .infinity)
 
             sidebarFooter

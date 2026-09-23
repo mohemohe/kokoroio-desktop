@@ -25,6 +25,7 @@ final class ChatStore: ObservableObject {
     @Published var signInError: String?
 
     let notifications: NotificationService
+    private let defaults: UserDefaults
     private var client: APIClient?
     private let realtime = RealtimeClient()
     private var credential: Credential?
@@ -45,8 +46,9 @@ final class ChatStore: ObservableObject {
     private var imageFallbackTask: Task<Void, Never>?
     private var imageFallbackRequestID: UUID?
 
-    init(notifications: NotificationService) {
+    init(notifications: NotificationService, defaults: UserDefaults = .standard) {
         self.notifications = notifications
+        self.defaults = defaults
         notifications.onOpenChannel = { [weak self] id in
             NSApp.activate(ignoringOtherApps: true)
             NSApp.windows.first(where: { $0.canBecomeMain })?.makeKeyAndOrderFront(nil)
@@ -109,7 +111,12 @@ final class ChatStore: ObservableObject {
             channels = normalize(counted)
             isSignedIn = true
             realtime.connect(baseURL: url, accessToken: candidate.token, channelIDs: channels.map(\.id))
-            if let first = channels.first { selectChannel(first.id) }
+            let savedChannelID = defaults.string(forKey: selectionKey(server: url, profileID: user.id))
+            if let savedChannelID, channels.contains(where: { $0.id == savedChannelID }) {
+                selectChannel(savedChannelID)
+            } else if let first = channels.first {
+                selectChannel(first.id)
+            }
             await notifications.refreshAuthorizationStatus()
         } catch { if signInAttemptID == attempt { signInError = error.localizedDescription } }
     }
@@ -122,6 +129,9 @@ final class ChatStore: ObservableObject {
         guard channels.contains(where: { $0.id == id }) else { return }
         if let previous = selectedChannelID { drafts[previous] = draft }
         selectedChannelID = id
+        if let credential, let profile {
+            defaults.set(id, forKey: selectionKey(server: credential.baseURL, profileID: profile.id))
+        }
         draft = drafts[id] ?? ""
         selectionID = UUID()
         showCachedMessages(in: id)
@@ -146,6 +156,10 @@ final class ChatStore: ObservableObject {
                 self.errorMessage = error.localizedDescription
             }
         }
+    }
+
+    private func selectionKey(server: URL, profileID: String) -> String {
+        "selectedChannel.\(server.absoluteString).\(profileID)"
     }
 
     func loadOlderMessages() {
