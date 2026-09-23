@@ -111,49 +111,64 @@ final class ChatStore: ObservableObject {
     }
 
     func addImages(_ urls: [URL]) {
-        guard let channelID = selectedChannelID, hasImgBBAPIKey, !isSending else { return }
-        let key = imgBBAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        let session = sessionID
+        guard selectedChannelID != nil, hasImgBBAPIKey, !isSending else { return }
         for url in urls {
-            let id = UUID()
             let previewAccess = url.startAccessingSecurityScopedResource()
             let thumbnail = NSImage(contentsOf: url)
             if previewAccess { url.stopAccessingSecurityScopedResource() }
-            let image = ComposerImage(id: id, fileName: url.lastPathComponent, thumbnail: thumbnail)
-            setImages(images(in: channelID) + [image], in: channelID)
-            Task { [weak self] in
-                do {
-                    let (data, mimeType) = try await Task.detached(priority: .utility) {
-                        let scoped = url.startAccessingSecurityScopedResource()
-                        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-                        let data = try Data(contentsOf: url)
-                        let mimeType = (try? url.resourceValues(forKeys: [.contentTypeKey]).contentType)?.preferredMIMEType
-                            ?? "application/octet-stream"
-                        return (data, mimeType)
-                    }.value
-                    let upload = try await self?.imgBBClient.upload(data: data, fileName: url.lastPathComponent, mimeType: mimeType, apiKey: key)
-                    guard let self, let upload else { return }
-                    if self.sessionID != session || self.image(id, in: channelID) == nil {
-                        try? await self.imgBBClient.delete(upload, apiKey: key)
-                        return
-                    }
-                    self.updateImage(id, in: channelID) { image in
-                        image.upload = upload
-                        image.isUploading = false
-                    }
-                    if self.image(id, in: channelID)?.removeWhenUploaded == true {
-                        self.removeImage(id, from: channelID)
-                    }
-                } catch {
-                    guard let self, self.sessionID == session else { return }
-                    self.updateImage(id, in: channelID) { image in
-                        image.isUploading = false
-                        image.isDeleting = false
-                        image.error = error.localizedDescription
-                    }
-                    if self.image(id, in: channelID)?.removeWhenUploaded == true {
-                        self.removeLocalImage(id, from: channelID)
-                    }
+            addImage(fileName: url.lastPathComponent, thumbnail: thumbnail) {
+                try await Task.detached(priority: .utility) {
+                    let scoped = url.startAccessingSecurityScopedResource()
+                    defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                    let data = try Data(contentsOf: url)
+                    let mimeType = (try? url.resourceValues(forKeys: [.contentTypeKey]).contentType)?.preferredMIMEType
+                        ?? "application/octet-stream"
+                    return (data, mimeType)
+                }.value
+            }
+        }
+    }
+
+    func addImageData(_ data: Data, fileName: String, mimeType: String) {
+        guard selectedChannelID != nil, hasImgBBAPIKey, !isSending else { return }
+        addImage(fileName: fileName, thumbnail: NSImage(data: data)) { (data, mimeType) }
+    }
+
+    private func addImage(
+        fileName: String,
+        thumbnail: NSImage?,
+        loadData: @escaping @Sendable () async throws -> (Data, String)
+    ) {
+        guard let channelID = selectedChannelID, hasImgBBAPIKey, !isSending else { return }
+        let id = UUID()
+        let key = imgBBAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let session = sessionID
+        setImages(images(in: channelID) + [ComposerImage(id: id, fileName: fileName, thumbnail: thumbnail)], in: channelID)
+        Task { [weak self] in
+            do {
+                let (data, mimeType) = try await loadData()
+                let upload = try await self?.imgBBClient.upload(data: data, fileName: fileName, mimeType: mimeType, apiKey: key)
+                guard let self, let upload else { return }
+                if self.sessionID != session || self.image(id, in: channelID) == nil {
+                    try? await self.imgBBClient.delete(upload, apiKey: key)
+                    return
+                }
+                self.updateImage(id, in: channelID) { image in
+                    image.upload = upload
+                    image.isUploading = false
+                }
+                if self.image(id, in: channelID)?.removeWhenUploaded == true {
+                    self.removeImage(id, from: channelID)
+                }
+            } catch {
+                guard let self, self.sessionID == session else { return }
+                self.updateImage(id, in: channelID) { image in
+                    image.isUploading = false
+                    image.isDeleting = false
+                    image.error = error.localizedDescription
+                }
+                if self.image(id, in: channelID)?.removeWhenUploaded == true {
+                    self.removeLocalImage(id, from: channelID)
                 }
             }
         }

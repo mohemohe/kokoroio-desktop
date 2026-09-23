@@ -44,9 +44,17 @@ struct ComposerView: View {
                         text: $store.draft,
                         height: $editorHeight,
                         isEnabled: !store.isSending,
+                        canAcceptImages: store.hasImgBBAPIKey && store.selectedChannelID != nil && !store.isSending,
                         channelID: store.selectedChannelID,
                         emojiPickerRequest: emojiPickerRequest,
-                        onSubmit: { if canSend { store.sendMessage() } }
+                        onSubmit: { if canSend { store.sendMessage() } },
+                        onImageInput: { input in
+                            switch input {
+                            case .files(let urls): store.addImages(urls)
+                            case .data(let data, let fileName, let mimeType):
+                                store.addImageData(data, fileName: fileName, mimeType: mimeType)
+                            }
+                        }
                     )
                     .frame(height: editorHeight)
                     .accessibilityLabel("メッセージ")
@@ -127,7 +135,11 @@ struct ComposerView: View {
             case .success(let urls):
                 Task { @MainActor in store.addImages(urls) }
             case .failure(let error):
-                Task { @MainActor in store.errorMessage = "画像を選択できませんでした: \(error.localizedDescription)" }
+                Task { @MainActor in
+                    if store.hasImgBBAPIKey {
+                        store.errorMessage = "画像を選択できませんでした: \(error.localizedDescription)"
+                    }
+                }
             }
         }
     }
@@ -192,6 +204,49 @@ struct ComposerView: View {
 
 }
 
+private enum ComposerImageInput {
+    case files([URL])
+    case data(Data, fileName: String, mimeType: String)
+
+    static func read(from pasteboard: NSPasteboard) -> Self? {
+        var fileURLs = (pasteboard.readObjects(
+            forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true]
+        ) ?? []).compactMap { $0 as? URL }.filter(\.isFileURL)
+        if fileURLs.isEmpty,
+           let paths = pasteboard.propertyList(forType: .init("NSFilenamesPboardType")) as? [String] {
+            fileURLs = paths.map { URL(fileURLWithPath: $0) }
+        }
+        if fileURLs.isEmpty, let value = pasteboard.string(forType: .fileURL),
+           let url = URL(string: value), url.isFileURL {
+            fileURLs = [url]
+        }
+        if !fileURLs.isEmpty {
+            let images = fileURLs.filter { url in
+                let scoped = url.startAccessingSecurityScopedResource()
+                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                let type = (try? url.resourceValues(forKeys: [.contentTypeKey]).contentType)
+                return type?.conforms(to: .image) == true
+                    || UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) == true
+            }
+            return images.isEmpty ? nil : .files(images)
+        }
+
+        if let data = pasteboard.data(forType: .png), NSImage(data: data) != nil {
+            return .data(data, fileName: "貼り付け画像.png", mimeType: "image/png")
+        }
+        if let data = pasteboard.data(forType: .init("public.jpeg")), NSImage(data: data) != nil {
+            return .data(data, fileName: "貼り付け画像.jpg", mimeType: "image/jpeg")
+        }
+        if let image = NSImage(pasteboard: pasteboard),
+           let tiff = image.tiffRepresentation,
+           let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) {
+            return .data(png, fileName: "貼り付け画像.png", mimeType: "image/png")
+        }
+        return nil
+    }
+}
+
 private struct ChatTextEditor: NSViewRepresentable {
     // One 16-point text line plus the 11-point top and bottom insets.
     static let minimumHeight: CGFloat = 38
@@ -199,9 +254,11 @@ private struct ChatTextEditor: NSViewRepresentable {
     @Binding var text: String
     @Binding var height: CGFloat
     var isEnabled: Bool
+    var canAcceptImages: Bool
     var channelID: String?
     var emojiPickerRequest: Int
     var onSubmit: () -> Void
+    var onImageInput: (ComposerImageInput) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -231,6 +288,9 @@ private struct ChatTextEditor: NSViewRepresentable {
         editor.isAutomaticQuoteSubstitutionEnabled = false
         editor.isAutomaticDashSubstitutionEnabled = false
         editor.onSubmit = onSubmit
+        editor.onImageInput = onImageInput
+        editor.canAcceptImages = canAcceptImages
+        editor.registerForDraggedTypes([.fileURL, .png, .tiff, .init("public.jpeg")])
         editor.string = text
         scrollView.documentView = editor
         context.coordinator.channelID = channelID
@@ -241,6 +301,8 @@ private struct ChatTextEditor: NSViewRepresentable {
         guard let editor = scrollView.documentView as? ComposerTextView else { return }
         context.coordinator.parent = self
         editor.onSubmit = onSubmit
+        editor.onImageInput = onImageInput
+        editor.canAcceptImages = canAcceptImages
         editor.isEditable = isEnabled
         if editor.string != text && !editor.hasMarkedText() {
             editor.string = text
@@ -291,8 +353,58 @@ private struct ChatTextEditor: NSViewRepresentable {
 
 private final class ComposerTextView: NSTextView {
     var onSubmit: (() -> Void)?
+    var onImageInput: ((ComposerImageInput) -> Void)?
+    var canAcceptImages = false
+
+    override func paste(_ sender: Any?) {
+        if !pasteImageIfPresent() { super.paste(sender) }
+    }
+
+    override func pasteAsPlainText(_ sender: Any?) {
+        if !pasteImageIfPresent() { super.pasteAsPlainText(sender) }
+    }
+
+    private func pasteImageIfPresent() -> Bool {
+        guard let input = ComposerImageInput.read(from: .general) else { return false }
+        if canAcceptImages { onImageInput?(input) }
+        return true
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard ComposerImageInput.read(from: sender.draggingPasteboard) != nil else {
+            return super.draggingEntered(sender)
+        }
+        return canAcceptImages ? .copy : []
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard ComposerImageInput.read(from: sender.draggingPasteboard) != nil else {
+            return super.draggingUpdated(sender)
+        }
+        return canAcceptImages ? .copy : []
+    }
+
+    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        if ComposerImageInput.read(from: sender.draggingPasteboard) != nil { return canAcceptImages }
+        return super.prepareForDragOperation(sender)
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard let input = ComposerImageInput.read(from: sender.draggingPasteboard) else {
+            return super.performDragOperation(sender)
+        }
+        guard canAcceptImages else { return false }
+        onImageInput?(input)
+        return true
+    }
 
     override func keyDown(with event: NSEvent) {
+        if event.modifierFlags.contains(.command),
+           !event.modifierFlags.contains(.option), !event.modifierFlags.contains(.control),
+           event.charactersIgnoringModifiers?.lowercased() == "v",
+           pasteImageIfPresent() {
+            return
+        }
         let isReturn = event.keyCode == 36 || event.keyCode == 76
         if isReturn && !event.modifierFlags.contains(.shift)
             && !event.modifierFlags.contains(.option) && !hasMarkedText() {
