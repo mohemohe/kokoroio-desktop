@@ -185,7 +185,94 @@ final class APITests: XCTestCase {
         catch { XCTAssertEqual(error as? APIError, .invalidMessage) }
     }
 
+    func testImgBBUploadUsesMultipartAndReturnsImageAndDeleteURLs() async throws {
+        APIURLProtocol.handler = { request in
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(request.url?.host, "api.imgbb.com")
+            XCTAssertEqual(request.url?.path, "/1/upload")
+            XCTAssertEqual(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems,
+                           [URLQueryItem(name: "key", value: "secret+key")])
+            let body = Self.rawBody(request)
+            let text = String(decoding: body, as: UTF8.self)
+            XCTAssertTrue(text.contains("name=\"image\"; filename=\"photo.png\""))
+            XCTAssertTrue(text.contains("Content-Type: image/png"))
+            XCTAssertTrue(text.contains("image bytes"))
+            return (200, Data(#"{"data":{"url":"https://i.ibb.co/img/photo.png","delete_url":"https://ibb.co/img/token"},"success":true,"status":200}"#.utf8))
+        }
+        let upload = try await ImgBBClient(session: session).upload(
+            data: Data("image bytes".utf8), fileName: "photo.png", mimeType: "image/png", apiKey: "secret+key"
+        )
+        XCTAssertEqual(upload.url.absoluteString, "https://i.ibb.co/img/photo.png")
+        XCTAssertEqual(upload.deleteURL.absoluteString, "https://ibb.co/img/token")
+    }
+
+    func testImgBBDeletePostsParsedURLAndEncodedForm() async throws {
+        APIURLProtocol.handler = { request in
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(request.url?.absoluteString, "https://ibb.co/json")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/x-www-form-urlencoded; charset=UTF-8")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Origin"), "https://ibb.co")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "X-Requested-With"), "XMLHttpRequest")
+            let form = String(decoding: Self.rawBody(request), as: UTF8.self)
+            XCTAssertTrue(form.contains("auth_token=secret%2Bkey"))
+            let fields = URLComponents(string: "?\(form)")!.queryItems!
+            XCTAssertEqual(Dictionary(uniqueKeysWithValues: fields.map { ($0.name, $0.value!) }), [
+                "auth_token": "secret+key", "pathname": "/img/token", "action": "delete",
+                "delete": "image", "from": "resource", "deleting[id]": "img",
+                "deleting[type]": "image", "deleting[privacy]": "public", "deleting[hash]": "token"
+            ])
+            return (200, Data())
+        }
+        let client = ImgBBClient(session: session)
+        try await client.delete(ImgBBUpload(url: URL(string: "https://i.ibb.co/img/photo.png")!,
+                                             deleteURL: URL(string: "https://ibb.co/img/token")!), apiKey: "secret+key")
+    }
+
+    func testImgBBDeleteRejectsInvalidURLsAndMissingKeyBeforeRequest() async throws {
+        APIURLProtocol.handler = { _ in XCTFail("Should not send request"); return (500, Data()) }
+        let client = ImgBBClient(session: session)
+        let imageURL = URL(string: "https://i.ibb.co/img/photo.png")!
+        for value in ["https://example.com/img/token", "http://ibb.co/img/token",
+                      "https://ibb.co:8443/img/token", "https://ibb.co/img/token?key=secret",
+                      "https://ibb.co/img/%2Ftoken", "https://ibb.co/img/"] {
+            do {
+                try await client.delete(ImgBBUpload(url: imageURL, deleteURL: URL(string: value)!), apiKey: "secret")
+                XCTFail("Expected unsafe delete URL: \(value)")
+            } catch ImgBBError.unsafeDeleteURL { }
+        }
+        do {
+            try await client.delete(ImgBBUpload(url: imageURL,
+                                                deleteURL: URL(string: "https://ibb.co/img/token")!), apiKey: "")
+            XCTFail("Expected missing API key")
+        } catch ImgBBError.missingAPIKey { }
+    }
+
+    func testImgBBDeleteReportsHTTPFailure() async throws {
+        APIURLProtocol.handler = { _ in (403, Data()) }
+        let client = ImgBBClient(session: session)
+        do {
+            try await client.delete(ImgBBUpload(url: URL(string: "https://i.ibb.co/img/photo.png")!,
+                                                deleteURL: URL(string: "https://ibb.co/img/token")!), apiKey: "secret")
+            XCTFail("Expected HTTP failure")
+        } catch ImgBBError.server(let status) {
+            XCTAssertEqual(status, 403)
+        }
+    }
+
+    func testComposerMessageAppendsImageURLsInOrder() {
+        let urls = ["https://i.ibb.co/second.png", "https://i.ibb.co/first.png"].map { URL(string: $0)! }
+        XCTAssertEqual(ComposerMessage.text(" hello \n", imageURLs: urls),
+                       "hello\nhttps://i.ibb.co/second.png\nhttps://i.ibb.co/first.png")
+        XCTAssertEqual(ComposerMessage.text("  ", imageURLs: urls),
+                       "https://i.ibb.co/second.png\nhttps://i.ibb.co/first.png")
+    }
+
     private static func readBody(_ request: URLRequest) throws -> [String: Any] {
+        let data = rawBody(request)
+        return try JSONSerialization.jsonObject(with: data) as! [String: Any]
+    }
+
+    private static func rawBody(_ request: URLRequest) -> Data {
         let data: Data
         if let body = request.httpBody { data = body }
         else if let stream = request.httpBodyStream {
@@ -200,7 +287,7 @@ final class APITests: XCTestCase {
             }
             data = result
         } else { data = Data() }
-        return try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        return data
     }
 
     private static let profile = #"{"id":"PROFILE01","type":"User","screen_name":"alice","display_name":"Alice K","avatar":"https://chat.example.test/avatar.png","avatars":[],"archived":false,"invited_channels_count":0}"#

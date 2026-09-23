@@ -105,6 +105,16 @@ private struct SettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
                 if let error = notifications.lastError { Text(error).foregroundStyle(.red) }
             }
+            Section("画像アップロード") {
+                SecureField("ImgBB の API キー", text: Binding(
+                    get: { store.imgBBAPIKey },
+                    set: { store.updateImgBBAPIKey($0) }
+                ))
+                .textFieldStyle(.roundedBorder)
+                Text("API キーは Mac の Keychain に保存されます。入力すると投稿欄から画像を追加できます。")
+                    .font(.caption).foregroundStyle(.secondary)
+                if let error = store.imgBBSettingsError { Text(error).foregroundStyle(.red) }
+            }
             Section("接続") {
                 LabeledContent("サーバー", value: store.serverURL)
                 if let profile = store.profile { LabeledContent("アカウント", value: "@" + profile.screenName) }
@@ -113,7 +123,7 @@ private struct SettingsView: View {
                 }
             }
         }
-        .formStyle(.grouped).padding().frame(width: 480, height: 390)
+        .formStyle(.grouped).padding().frame(width: 480, height: 470)
         .task { await notifications.refreshAuthorizationStatus() }
     }
 }

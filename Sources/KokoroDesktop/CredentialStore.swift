@@ -11,6 +11,8 @@ struct Credential: Codable, Sendable {
 enum CredentialStore {
     private static let service = "io.kokoro.desktop.credentials"
     private static let account = "current-session"
+    private static let imgBBService = "io.kokoro.desktop.imgbb"
+    private static let imgBBAccount = "api-key"
 
     static func load() throws -> Credential? {
         var query = identityQuery
@@ -54,11 +56,57 @@ enum CredentialStore {
         }
     }
 
+    static func loadImgBBAPIKey() throws -> String? {
+        var query = imgBBQuery
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        let context = LAContext()
+        context.interactionNotAllowed = true
+        query[kSecUseAuthenticationContext as String] = context
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status != errSecItemNotFound else { return nil }
+        guard status == errSecSuccess else { throw KeychainError(status: status) }
+        guard let data = result as? Data, let key = String(data: data, encoding: .utf8) else {
+            throw KeychainError(status: errSecDecode)
+        }
+        return key
+    }
+
+    static func saveImgBBAPIKey(_ value: String) throws {
+        let key = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if key.isEmpty {
+            let status = SecItemDelete(imgBBQuery as CFDictionary)
+            guard status == errSecSuccess || status == errSecItemNotFound else { throw KeychainError(status: status) }
+            return
+        }
+        let changes: [String: Any] = [kSecValueData as String: Data(key.utf8)]
+        let status = SecItemUpdate(imgBBQuery as CFDictionary, changes as CFDictionary)
+        if status == errSecItemNotFound {
+            var item = imgBBQuery
+            item[kSecValueData as String] = Data(key.utf8)
+            item[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+            let insertionStatus = SecItemAdd(item as CFDictionary, nil)
+            guard insertionStatus == errSecSuccess else { throw KeychainError(status: insertionStatus) }
+        } else if status != errSecSuccess {
+            throw KeychainError(status: status)
+        }
+    }
+
     private static var identityQuery: [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
+            kSecAttrSynchronizable as String: false,
+        ]
+    }
+
+    private static var imgBBQuery: [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: imgBBService,
+            kSecAttrAccount as String: imgBBAccount,
             kSecAttrSynchronizable as String: false,
         ]
     }

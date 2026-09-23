@@ -1,6 +1,18 @@
 import AppKit
 import Combine
 import KokoroCore
+import UniformTypeIdentifiers
+
+struct ComposerImage: Identifiable {
+    let id: UUID
+    let fileName: String
+    let thumbnail: NSImage?
+    var upload: ImgBBUpload?
+    var isUploading = true
+    var isDeleting = false
+    var removeWhenUploaded = false
+    var error: String?
+}
 
 @MainActor
 final class ChatStore: ObservableObject {
@@ -13,6 +25,9 @@ final class ChatStore: ObservableObject {
     @Published var isSending = false
     @Published var errorMessage: String?
     @Published var draft = ""
+    @Published private(set) var composerImages: [ComposerImage] = []
+    @Published private(set) var imgBBAPIKey = ""
+    @Published private(set) var imgBBSettingsError: String?
     @Published var channelSearch = ""
     @Published var isSearchOpen = false
     @Published var searchQuery = ""
@@ -38,6 +53,8 @@ final class ChatStore: ObservableObject {
     private var signInAttemptID = UUID()
     private var selectionID = UUID()
     private var drafts: [String: String] = [:]
+    private var imagesByChannel: [String: [ComposerImage]] = [:]
+    private let imgBBClient = ImgBBClient()
     private var cache: [String: [Message]] = [:]
     private var confirmedTails: [String: Int] = [:]
     private var pendingSends: [String: (text: String, key: String)] = [:]
@@ -56,6 +73,8 @@ final class ChatStore: ObservableObject {
     init(notifications: NotificationService, defaults: UserDefaults = .standard) {
         self.notifications = notifications
         self.defaults = defaults
+        do { imgBBAPIKey = try CredentialStore.loadImgBBAPIKey() ?? "" }
+        catch { imgBBSettingsError = error.localizedDescription }
         notifications.onOpenChannel = { [weak self] id in
             NSApp.activate(ignoringOtherApps: true)
             NSApp.windows.first(where: { $0.canBecomeMain })?.makeKeyAndOrderFront(nil)
@@ -73,6 +92,133 @@ final class ChatStore: ObservableObject {
     }
 
     var selectedChannel: Channel? { channels.first { $0.id == selectedChannelID } }
+    var hasImgBBAPIKey: Bool { !imgBBAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    var composedDraft: String {
+        ComposerMessage.text(draft, imageURLs: composerImages.compactMap { $0.upload?.url })
+    }
+    var canSendDraft: Bool {
+        !isSending && selectedChannelID != nil && !composedDraft.isEmpty
+            && composedDraft.unicodeScalars.count <= 4_000
+            && composerImages.allSatisfy { !$0.isUploading && !$0.isDeleting && $0.error == nil && $0.upload != nil }
+    }
+
+    func updateImgBBAPIKey(_ value: String) {
+        do {
+            try CredentialStore.saveImgBBAPIKey(value)
+            imgBBAPIKey = value
+            imgBBSettingsError = nil
+        } catch { imgBBSettingsError = error.localizedDescription }
+    }
+
+    func addImages(_ urls: [URL]) {
+        guard let channelID = selectedChannelID, hasImgBBAPIKey, !isSending else { return }
+        let key = imgBBAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let session = sessionID
+        for url in urls {
+            let id = UUID()
+            let previewAccess = url.startAccessingSecurityScopedResource()
+            let thumbnail = NSImage(contentsOf: url)
+            if previewAccess { url.stopAccessingSecurityScopedResource() }
+            let image = ComposerImage(id: id, fileName: url.lastPathComponent, thumbnail: thumbnail)
+            setImages(images(in: channelID) + [image], in: channelID)
+            Task { [weak self] in
+                do {
+                    let (data, mimeType) = try await Task.detached(priority: .utility) {
+                        let scoped = url.startAccessingSecurityScopedResource()
+                        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                        let data = try Data(contentsOf: url)
+                        let mimeType = (try? url.resourceValues(forKeys: [.contentTypeKey]).contentType)?.preferredMIMEType
+                            ?? "application/octet-stream"
+                        return (data, mimeType)
+                    }.value
+                    let upload = try await self?.imgBBClient.upload(data: data, fileName: url.lastPathComponent, mimeType: mimeType, apiKey: key)
+                    guard let self, let upload else { return }
+                    if self.sessionID != session || self.image(id, in: channelID) == nil {
+                        try? await self.imgBBClient.delete(upload, apiKey: key)
+                        return
+                    }
+                    self.updateImage(id, in: channelID) { image in
+                        image.upload = upload
+                        image.isUploading = false
+                    }
+                    if self.image(id, in: channelID)?.removeWhenUploaded == true {
+                        self.removeImage(id, from: channelID)
+                    }
+                } catch {
+                    guard let self, self.sessionID == session else { return }
+                    self.updateImage(id, in: channelID) { image in
+                        image.isUploading = false
+                        image.isDeleting = false
+                        image.error = error.localizedDescription
+                    }
+                    if self.image(id, in: channelID)?.removeWhenUploaded == true {
+                        self.removeLocalImage(id, from: channelID)
+                    }
+                }
+            }
+        }
+    }
+
+    func removeImage(_ id: UUID) {
+        guard let channelID = selectedChannelID else { return }
+        removeImage(id, from: channelID)
+    }
+
+    private func removeImage(_ id: UUID, from channelID: String) {
+        guard !isSending, let image = image(id, in: channelID), !image.isDeleting else { return }
+        if image.isUploading {
+            updateImage(id, in: channelID) { $0.removeWhenUploaded = true }
+            return
+        }
+        guard let upload = image.upload else { removeLocalImage(id, from: channelID); return }
+        updateImage(id, in: channelID) { $0.isDeleting = true; $0.error = nil }
+        let session = sessionID
+        let key = imgBBAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        Task { [weak self] in
+            do {
+                try await self?.imgBBClient.delete(upload, apiKey: key)
+                guard let self, self.sessionID == session else { return }
+                self.removeLocalImage(id, from: channelID)
+            } catch {
+                guard let self, self.sessionID == session else { return }
+                self.updateImage(id, in: channelID) { $0.isDeleting = false; $0.error = error.localizedDescription }
+            }
+        }
+    }
+
+    func moveImage(_ id: UUID, to targetID: UUID) {
+        guard let channelID = selectedChannelID, !isSending, id != targetID else { return }
+        var images = images(in: channelID)
+        guard let source = images.firstIndex(where: { $0.id == id }),
+              let target = images.firstIndex(where: { $0.id == targetID }) else { return }
+        let image = images.remove(at: source)
+        images.insert(image, at: target)
+        setImages(images, in: channelID)
+    }
+
+    private func image(_ id: UUID, in channelID: String) -> ComposerImage? {
+        images(in: channelID).first { $0.id == id }
+    }
+
+    private func images(in channelID: String) -> [ComposerImage] {
+        channelID == selectedChannelID ? composerImages : imagesByChannel[channelID] ?? []
+    }
+
+    private func setImages(_ images: [ComposerImage], in channelID: String) {
+        imagesByChannel[channelID] = images
+        if selectedChannelID == channelID { composerImages = images }
+    }
+
+    private func updateImage(_ id: UUID, in channelID: String, _ change: (inout ComposerImage) -> Void) {
+        var images = images(in: channelID)
+        guard let index = images.firstIndex(where: { $0.id == id }) else { return }
+        change(&images[index])
+        setImages(images, in: channelID)
+    }
+
+    private func removeLocalImage(_ id: UUID, from channelID: String) {
+        setImages(images(in: channelID).filter { $0.id != id }, in: channelID)
+    }
     var isShowingSearchResults: Bool { searchResults != nil }
     var displayedMessages: [Message] { searchResults ?? messages }
     var filteredChannels: [Channel] {
@@ -137,12 +283,16 @@ final class ChatStore: ObservableObject {
     func selectChannel(_ id: String) {
         guard channels.contains(where: { $0.id == id }) else { return }
         closeSearch()
-        if let previous = selectedChannelID { drafts[previous] = draft }
+        if let previous = selectedChannelID {
+            drafts[previous] = draft
+            imagesByChannel[previous] = composerImages
+        }
         selectedChannelID = id
         if let credential, let profile {
             defaults.set(id, forKey: selectionKey(server: credential.baseURL, profileID: profile.id))
         }
         draft = drafts[id] ?? ""
+        composerImages = imagesByChannel[id] ?? []
         selectionID = UUID()
         showCachedMessages(in: id)
         isAtBottom = true
@@ -240,8 +390,8 @@ final class ChatStore: ObservableObject {
     }
 
     func sendMessage() {
-        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, text.unicodeScalars.count <= 4000, !isSending, let channel = selectedChannel else { return }
+        guard canSendDraft, let channel = selectedChannel else { return }
+        let text = composedDraft
         guard let api = client else { return }
         let pending = pendingSends[channel.id]
         let key = pending?.text == text ? pending!.key : UUID().uuidString.lowercased()
@@ -261,6 +411,7 @@ final class ChatStore: ObservableObject {
                     if self.draft == originalDraft { self.draft = ""; self.drafts[channel.id] = "" }
                     self.isAtBottom = true
                 } else if self.drafts[channel.id] == originalDraft { self.drafts[channel.id] = "" }
+                self.setImages([], in: channel.id)
                 self.isSending = false
                 await self.markSelectedChannelRead()
             } catch {
@@ -501,7 +652,7 @@ final class ChatStore: ObservableObject {
         notifications.resetSession()
         refreshTask?.cancel(); refreshTask = nil
         readTasks.values.forEach { $0.cancel() }; readTasks = [:]
-        client = nil; credential = nil; channels = []; messages = []; cache = [:]; drafts = [:]; confirmedTails = [:]
+        client = nil; credential = nil; channels = []; messages = []; cache = [:]; drafts = [:]; imagesByChannel = [:]; composerImages = []; confirmedTails = [:]
         pendingSends = [:]; seenEvents = []; messageRevisions = [:]; eventRevision = 0; profile = nil; selectedChannelID = nil
         draft = ""; channelSearch = ""; errorMessage = nil; unreadOnly = false
         isSignedIn = false; isSending = false; isLoadingMessages = false; isLoadingMore = false

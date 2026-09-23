@@ -1,24 +1,36 @@
 import AppKit
 import KokoroCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ComposerView: View {
     @EnvironmentObject private var store: ChatStore
     @State private var editorHeight: CGFloat = ChatTextEditor.minimumHeight
     @State private var emojiPickerRequest = 0
+    @State private var isImagePickerPresented = false
 
     private let characterLimit = 4_000
 
-    private var characterCount: Int { store.draft.unicodeScalars.count }
+    private var characterCount: Int { store.composedDraft.unicodeScalars.count }
 
-    private var canSend: Bool {
-        !store.isSending && !store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && characterCount <= characterLimit && store.selectedChannelID != nil
-    }
+    private var canSend: Bool { store.canSendDraft }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             VStack(spacing: 0) {
+                if !store.composerImages.isEmpty {
+                    ScrollView(.horizontal) {
+                        HStack(spacing: 8) {
+                            ForEach(store.composerImages) { image in
+                                thumbnail(for: image)
+                            }
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                    }
+                    .frame(height: 82)
+                    Divider()
+                }
                 ZStack(alignment: .topLeading) {
                     if store.draft.isEmpty {
                         Text("\(store.selectedChannel?.name ?? "チャンネル") にメッセージを送信")
@@ -41,6 +53,16 @@ struct ComposerView: View {
                 }
 
                 HStack(spacing: 10) {
+                    Button { isImagePickerPresented = true } label: {
+                        Image(systemName: "photo")
+                            .font(.system(size: 16))
+                            .foregroundStyle(store.hasImgBBAPIKey ? .secondary : .tertiary)
+                            .frame(width: 28, height: 28)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!store.hasImgBBAPIKey || store.isSending || store.selectedChannelID == nil)
+                    .help(store.hasImgBBAPIKey ? "画像を追加" : "設定で ImgBB の API キーを入力してください")
+                    .accessibilityLabel("画像を追加")
                     Button {
                         emojiPickerRequest += 1
                     } label: {
@@ -100,7 +122,74 @@ struct ComposerView: View {
         .padding(.horizontal, 24)
         .padding(.top, 10)
         .padding(.bottom, 16)
+        .fileImporter(isPresented: $isImagePickerPresented, allowedContentTypes: [.image], allowsMultipleSelection: true) { result in
+            switch result {
+            case .success(let urls):
+                Task { @MainActor in store.addImages(urls) }
+            case .failure(let error):
+                Task { @MainActor in store.errorMessage = "画像を選択できませんでした: \(error.localizedDescription)" }
+            }
+        }
     }
+
+    private func thumbnail(for image: ComposerImage) -> some View {
+        ZStack(alignment: .topTrailing) {
+            Group {
+                if let preview = image.thumbnail {
+                    Image(nsImage: preview)
+                        .resizable()
+                        .scaledToFill()
+                } else {
+                    Image(systemName: "photo")
+                        .font(.title2)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+            .frame(width: 76, height: 64)
+            .background(Color.primary.opacity(0.06))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .overlay {
+                if image.isUploading || image.isDeleting {
+                    ZStack {
+                        Color.black.opacity(0.3)
+                        ProgressView().controlSize(.small).tint(.white)
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                } else if image.error != nil {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.white)
+                        .padding(5)
+                        .background(.red, in: Circle())
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+            .draggable(image.id.uuidString)
+            .dropDestination(for: String.self) { items, _ in
+                guard let source = items.first.flatMap(UUID.init(uuidString:)) else { return false }
+                store.moveImage(source, to: image.id)
+                return true
+            }
+
+            Button {
+                store.removeImage(image.id)
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 18, height: 18)
+                    .background(.black.opacity(0.7), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .disabled(store.isSending || image.isDeleting)
+            .padding(3)
+            .help("画像を削除")
+            .accessibilityLabel("\(image.fileName) を削除")
+        }
+        .help(image.error ?? image.fileName)
+        .accessibilityElement(children: .contain)
+    }
+
 }
 
 private struct ChatTextEditor: NSViewRepresentable {
