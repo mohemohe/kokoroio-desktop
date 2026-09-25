@@ -29,6 +29,7 @@ final class NotificationService: NSObject, ObservableObject, UNUserNotificationC
         static let enabled = "notifications.enabled"
         static let soundEnabled = "notifications.soundEnabled"
         static let target = "notifications.target"
+        static let badgeAuthorizationRequested = "notifications.badgeAuthorizationRequested"
     }
 
     init(defaults: UserDefaults = .standard, center: UNUserNotificationCenter = .current()) {
@@ -40,7 +41,16 @@ final class NotificationService: NSObject, ObservableObject, UNUserNotificationC
         target = DesktopNotificationTarget(rawValue: defaults.string(forKey: Keys.target) ?? "") ?? .mentionsAndDirectMessages
         super.init()
         center.delegate = self
-        Task { await refreshAuthorizationStatus() }
+        Task {
+            let settings = await center.notificationSettings()
+            authorizationStatus = settings.authorizationStatus
+            if settings.badgeSetting == .enabled {
+                defaults.set(true, forKey: Keys.badgeAuthorizationRequested)
+            } else if isAuthorized && !defaults.bool(forKey: Keys.badgeAuthorizationRequested) {
+                // Existing installations requested alerts and sounds, but never badges.
+                await requestAuthorization()
+            }
+        }
     }
 
     var isAuthorized: Bool {
@@ -54,7 +64,8 @@ final class NotificationService: NSObject, ObservableObject, UNUserNotificationC
     func requestAuthorization() async {
         lastError = nil
         do {
-            _ = try await center.requestAuthorization(options: [.alert, .sound])
+            _ = try await center.requestAuthorization(options: [.alert, .sound, .badge])
+            defaults.set(true, forKey: Keys.badgeAuthorizationRequested)
         } catch {
             lastError = error.localizedDescription
         }

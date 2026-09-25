@@ -59,8 +59,8 @@ struct WorkspaceView: View {
                     Text("未読メッセージ")
                         .font(.system(size: 12, weight: .medium))
                     Spacer()
-                    if store.totalUnreadCount > 0 {
-                        unreadBadge(store.totalUnreadCount)
+                    if let unreadBadgeLabel = store.totalUnreadBadgeLabel {
+                        unreadBadge(unreadBadgeLabel)
                     }
                 }
                 .foregroundStyle(.primary)
@@ -131,8 +131,8 @@ struct WorkspaceView: View {
         channel.kind.lowercased().contains("private")
     }
 
-    private func unreadBadge(_ count: Int) -> some View {
-        Text(count > 99 ? "99+" : String(count))
+    private func unreadBadge(_ label: String) -> some View {
+        Text(label)
             .font(.system(size: 10, weight: .bold, design: .rounded))
             .padding(.horizontal, 6)
             .padding(.vertical, 2)

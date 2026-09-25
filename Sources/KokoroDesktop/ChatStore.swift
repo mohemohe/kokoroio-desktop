@@ -16,7 +16,13 @@ struct ComposerImage: Identifiable {
 
 @MainActor
 final class ChatStore: ObservableObject {
-    @Published var channels: [Channel] = []
+    @Published var channels: [Channel] = [] {
+        didSet {
+            let dockTile = NSApplication.shared.dockTile
+            dockTile.badgeLabel = totalUnreadBadgeLabel
+            dockTile.display()
+        }
+    }
     @Published var selectedChannelID: String?
     @Published var messages: [Message] = []
     @Published var isLoadingMessages = false
@@ -243,6 +249,10 @@ final class ChatStore: ObservableObject {
         }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
     var totalUnreadCount: Int { channels.reduce(0) { $0 + $1.unreadCount } }
+    var totalUnreadBadgeLabel: String? {
+        let count = totalUnreadCount
+        return count > 0 ? (count > 99 ? "99+" : String(count)) : nil
+    }
 
     func restoreSession() async {
         do {
