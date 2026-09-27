@@ -24,6 +24,7 @@ final class ChatStore: ObservableObject {
         }
     }
     @Published var selectedChannelID: String?
+    @Published private(set) var pinnedChannelIDs: Set<String> = []
     @Published var messages: [Message] = []
     @Published var isLoadingMessages = false
     @Published var isLoadingMore = false
@@ -248,6 +249,22 @@ final class ChatStore: ObservableObject {
             (channelSearch.isEmpty || channel.name.localizedCaseInsensitiveContains(channelSearch))
         }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
+    var filteredPinnedChannels: [Channel] {
+        filteredChannels.filter { pinnedChannelIDs.contains($0.id) }
+    }
+
+    func isChannelPinned(_ id: String) -> Bool {
+        pinnedChannelIDs.contains(id)
+    }
+
+    func toggleChannelPin(_ id: String) {
+        guard channels.contains(where: { $0.id == id }), let credential, let profile else { return }
+        if !pinnedChannelIDs.insert(id).inserted {
+            pinnedChannelIDs.remove(id)
+        }
+        defaults.set(pinnedChannelIDs.sorted(), forKey: pinnedChannelsKey(server: credential.baseURL, profileID: profile.id))
+    }
+
     var totalUnreadCount: Int { channels.reduce(0) { $0 + $1.unreadCount } }
     var totalUnreadBadgeLabel: String? {
         let count = totalUnreadCount
@@ -288,6 +305,7 @@ final class ChatStore: ObservableObject {
             client = api
             profile = user
             serverURL = url.absoluteString
+            pinnedChannelIDs = Set(defaults.stringArray(forKey: pinnedChannelsKey(server: url, profileID: user.id)) ?? [])
             channels = normalize(counted)
             isSignedIn = true
             realtime.connect(baseURL: url, accessToken: candidate.token, channelIDs: channels.map(\.id))
@@ -345,6 +363,10 @@ final class ChatStore: ObservableObject {
 
     private func selectionKey(server: URL, profileID: String) -> String {
         "selectedChannel.\(server.absoluteString).\(profileID)"
+    }
+
+    private func pinnedChannelsKey(server: URL, profileID: String) -> String {
+        "pinnedChannels.\(server.absoluteString).\(profileID)"
     }
 
     func openSearch() {
@@ -678,6 +700,7 @@ final class ChatStore: ObservableObject {
         refreshTask?.cancel(); refreshTask = nil
         readTasks.values.forEach { $0.cancel() }; readTasks = [:]
         client = nil; credential = nil; channels = []; messages = []; cache = [:]; drafts = [:]; imagesByChannel = [:]; composerImages = []; confirmedTails = [:]
+        pinnedChannelIDs = []
         pendingSends = [:]; seenEvents = []; messageRevisions = [:]; eventRevision = 0; profile = nil; selectedChannelID = nil
         draft = ""; channelSearch = ""; errorMessage = nil; unreadOnly = false
         isSignedIn = false; isSending = false; isLoadingMessages = false; isLoadingMore = false

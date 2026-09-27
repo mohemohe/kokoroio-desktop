@@ -10,6 +10,7 @@ struct WorkspaceView: View {
     @EnvironmentObject private var store: ChatStore
     @Environment(\.colorScheme) private var colorScheme
     @FocusState private var isSearchFocused: Bool
+    @State private var selectedSidebarRow: SidebarChannelID?
 
     private var contentAccent: Color {
         colorScheme == .dark ? Color(red: 0.77, green: 0.65, blue: 0.96) : KChatPalette.accent
@@ -79,9 +80,14 @@ struct WorkspaceView: View {
 
             ScrollViewReader { proxy in
                 List(selection: Binding(
-                    get: { store.selectedChannelID },
-                    set: { if let id = $0 { store.selectChannel(id) } }
+                    get: { sidebarSelection },
+                    set: { selection in
+                        guard let selection else { return }
+                        selectedSidebarRow = selection
+                        store.selectChannel(selection.channelID)
+                    }
                 )) {
+                    PinnedChannelSidebarSection()
                     ChannelSidebarSection(title: "チャンネル", channels: publicChannels, icon: "number")
                     ChannelSidebarSection(title: "プライベート", channels: privateChannels, icon: "lock.fill")
                     ChannelSidebarSection(title: "ダイレクトメッセージ", channels: directChannels, icon: "bubble.left")
@@ -104,8 +110,9 @@ struct WorkspaceView: View {
                     // Give the channel tree a layout pass to expand the selected row.
                     await Task.yield()
                     guard !Task.isCancelled, store.selectedChannelID == id,
-                          store.filteredChannels.contains(where: { $0.id == id }) else { return }
-                    proxy.scrollTo(id)
+                          store.filteredChannels.contains(where: { $0.id == id }),
+                          let selection = sidebarSelection else { return }
+                    proxy.scrollTo(selection)
                 }
             }
             .frame(maxHeight: .infinity)
@@ -113,6 +120,18 @@ struct WorkspaceView: View {
             sidebarFooter
         }
         .background { SidebarMaterial().ignoresSafeArea() }
+    }
+
+    private var sidebarSelection: SidebarChannelID? {
+        guard let id = store.selectedChannelID else { return nil }
+        if let selectedSidebarRow, selectedSidebarRow.channelID == id {
+            switch selectedSidebarRow {
+            case .channel: return selectedSidebarRow
+            case .pinned where store.isChannelPinned(id): return selectedSidebarRow
+            default: break
+            }
+        }
+        return store.isChannelPinned(id) ? .pinned(id) : .channel(id)
     }
 
     private var publicChannels: [Channel] {
