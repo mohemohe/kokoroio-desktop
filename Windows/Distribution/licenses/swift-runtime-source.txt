@@ -1,0 +1,5 @@
+Swift runtime license source (retrieved 2026-09-28):
+https://github.com/swiftlang/swift/blob/swift-6.4.0-RELEASE/LICENSE.txt
+
+Swift is licensed under Apache License 2.0 with Runtime Library Exception.
+See swift-runtime.txt for the full license text.

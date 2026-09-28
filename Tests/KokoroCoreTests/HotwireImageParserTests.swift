@@ -22,6 +22,32 @@ final class HotwireImageParserTests: XCTestCase {
         XCTAssertEqual(preview.thumbnailURL.absoluteString, "https://cdn.example.test/thumb.png")
     }
 
+    func testServerMessageWithActionMenuAndSelfClosingImages() throws {
+        let html = stream("""
+        <div class="talk not-continued" id="message_87" data-channel-hashid="CHANNEL01">
+          <div class="message-action-menu"><turbo-frame id="message_87_actions" src="/actions">
+            <div class="message-action-loading"><svg class="lucide lucide-loader animate-spin"><path /><path /></svg></div>
+          </turbo-frame></div>
+          <div class="avatar"><a href="/profile"><img src="/avatar.png"/></a></div>
+          <div class="message">
+            <button class="message-action-toggle"><svg class="lucide lucide-more-horizontal"><circle /><circle /><circle /></svg></button>
+            <div class="speaker"><a href="/profile">Alice</a><small><time>12:00</time></small></div>
+            <div><div id="message_87_content">
+              <div class="filtered-text"><p>Photo</p></div>
+              <div class="embed-contents"><div class="embed-uploaded-images">
+                <a class="embed-uploaded-image-link" href="/full.png"><img class="embed-uploaded-image" src="/thumb.png"/></a>
+              </div></div>
+              <div class="embed-contents"></div>
+            </div></div>
+          </div>
+        </div>
+        """)
+        let record = try XCTUnwrap(HotwireImageParser.parse(html, baseURL: baseURL).first)
+        XCTAssertEqual(record.messageID, 87)
+        XCTAssertEqual(record.images.map(\.linkURL.path), ["/full.png"])
+        XCTAssertEqual(record.images.map(\.thumbnailURL.path), ["/thumb.png"])
+    }
+
     func testNSFWWrapperAndOrderArePreserved() {
         let restricted = "<div class=\"nsfw-media\">\(image("/first.png"))<svg class=\"nsfw-mark\"><path d=\"M1 2\"/></svg></div>"
         let html = stream(message(87, attachments: restricted + image("/second.png")))

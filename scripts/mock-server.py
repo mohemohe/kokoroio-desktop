@@ -4,6 +4,7 @@
 Start: python3 scripts/mock-server.py
 Tree scenario: python3 scripts/mock-server.py --channel-tree
 Legacy images: python3 scripts/mock-server.py --legacy-images --port 8876
+No joined channels: python3 scripts/mock-server.py --empty-channels
 Sign in: http://127.0.0.1:8765 with the public test token test-token.
 Inspect: GET /test/state with X-Access-Token: test-token.
 Publish: POST /test/publish with {"channel_id":"CHAN00002","content":"Hello"}.
@@ -68,7 +69,7 @@ def image_png(seed, thumbnail=True):
 
 
 class Fixture:
-    def __init__(self, channel_tree=False, legacy_images=False, port=8765):
+    def __init__(self, channel_tree=False, legacy_images=False, port=8765, empty_channels=False):
         self.lock = threading.RLock()
         self.clients = set()
         self.records = []
@@ -82,6 +83,18 @@ class Fixture:
         self.image_origin = f"http://127.0.0.1:{port}"
         self.images = {}
         self.message_images = {}
+        self.image_requests = []
+        self.media_expectations = {"required_images": [], "forbidden_images": []}
+        if legacy_images:
+            avatar_path = "/test/images/avatar-other.png"
+            self.images[avatar_path] = (17, True)
+            self.other["avatar"] = self.image_origin + avatar_path
+            self.other["avatars"] = [{"size": 40, "url": self.other["avatar"], "is_default": False}]
+            self.media_expectations["required_images"].append(avatar_path)
+            # Markdown images are rendered as links, never independently fetched.
+            inline_image_path = "/test/images/inline-markdown.png"
+            self.images[inline_image_path] = (73, True)
+            self.media_expectations["forbidden_images"].append(inline_image_path)
         channels = [
             ("general", "public_channel", "みんなで気軽に話す場所。REST とリアルタイム通信を確認できます。"),
             ("team-private", "private_channel", "非公開チャンネル。別チャンネルからの新着と通知のテスト用。"),
@@ -126,6 +139,7 @@ class Fixture:
                 if legacy_images and index == 1:
                     cases = {
                         20: (1, True, False, "100 件以上前の旧形式画像"),
+                        118: (1, False, False, "削除済みメッセージの画像は読み込みません"),
                         121: (1, True, False, "旧形式画像 1 枚（Hotwire で補完）"),
                         122: (2, True, False, "旧形式画像 2 枚（Hotwire で補完）"),
                         123: (1, True, True, "NSFW の旧形式画像（表示操作で確認）"),
@@ -133,11 +147,65 @@ class Fixture:
                     }
                     if number in cases:
                         image_count, legacy_image, nsfw, content = cases[number]
+                    if number == 119:
+                        content = ("### Markdown のレイアウト\n\n"
+                                   "- 最初の項目\n- 二番目の項目\n  - 入れ子の項目\n\n"
+                                   "> 引用したメッセージ\n\n"
+                                   "| 機能 | 状態 |\n| --- | --- |\n"
+                                   "| <#CHAN00001|one | two> | 表の中の参照 |\n"
+                                   "| コード | 表示できます |\n\n"
+                                   "```swift\nlet message = \"こんにちは\"\nprint(message)\n```")
+                    if number == 124:
+                        # The final two messages must group, without changing media IDs.
+                        author = self.other
+                    if number == 125:
+                        content = ("ローカルサーバーに接続しました。**太字**・*斜体*・~~取り消し線~~\n"
+                                   "`let value = 1` <#CHAN00001|general> <@OTHER0001|Hana> :tada: :pray::skin-tone-6:\n"
+                                   f"[![リンク内画像]({self.image_origin}/test/images/inline-markdown.png)]"
+                                   f"({self.image_origin}/test/preview/public)")
                 self.add_message(channel_id, content, author,
                                  published_at=timestamp(start + timedelta(minutes=number)),
                                  image_count=image_count, legacy_images=legacy_image, nsfw=nsfw)
+                if legacy_images and index == 1:
+                    message = self.messages[channel_id][-1]
+                    if number == 118:
+                        message["status"] = "deleted"
+                        self.media_expectations["forbidden_images"].extend(
+                            urlsplit(url).path for attachment in self.message_images[message["id"]]
+                            for url in attachment.values())
+                    if number == 123:
+                        self.media_expectations["forbidden_images"].extend(
+                            urlsplit(url).path for attachment in self.message_images[message["id"]]
+                            for url in attachment.values())
+                    if number in (121, 122, 124):
+                        self.media_expectations["required_images"].extend(
+                            urlsplit(attachment["thumb"]).path for attachment in self.message_images[message["id"]])
+                    if number in (120, 125):
+                        restricted = number == 120
+                        preview_name = "restricted" if restricted else "public"
+                        thumbnail_path = f"/test/images/embed-{preview_name}-thumb.png"
+                        self.images[thumbnail_path] = (number, True)
+                        link = self.image_origin + f"/test/preview/{preview_name}"
+                        message["embedded_urls"] = [link]
+                        message["embed_contents"].append({
+                            "url": link, "position": 0,
+                            "data": {"type": "Link", "url": link,
+                                     "title": "制限付きのリンク" if restricted else "Kokoro Desktop のリンクプレビュー",
+                                     "description": "ローカルの画像と説明を使ったリンクカードです。",
+                                     "thumbnail_url": self.image_origin + thumbnail_path,
+                                     "restriction_policy": "Restricted" if restricted else "Unrestricted"}})
+                        key = "forbidden_images" if restricted else "required_images"
+                        self.media_expectations[key].append(thumbnail_path)
             self.memberships[channel_id]["latest_read_message_id"] = self.channels[channel_id]["latest_message_id"] - 2
             self.memberships[channel_id]["unread_count"] = 2
+
+        if empty_channels:
+            self.channels.clear()
+            self.memberships.clear()
+            self.messages.clear()
+            self.images.clear()
+            self.message_images.clear()
+            self.media_expectations = {"required_images": [], "forbidden_images": []}
 
     def record(self, kind, **values):
         with self.lock:
@@ -170,7 +238,8 @@ class Fixture:
             channel["messages_count"] += 1
             message = {
                 "id": message_id, "idempotent_key": key or str(uuid.uuid4()),
-                "display_name": author["display_name"], "avatar": None, "avatars": [],
+                "display_name": author["display_name"], "avatar": author.get("avatar"),
+                "avatars": copy.deepcopy(author.get("avatars", [])),
                 "expand_embed_contents": True, "status": "active", "content": html.escape(content),
                 "html_content": html.escape(content), "plaintext_content": content, "raw_content": content,
                 "embedded_urls": [], "embed_contents": [], "published_at": published_at,
@@ -244,7 +313,7 @@ class WebSocket:
         self.channel_ids = set()
         self.subscribed = False
 
-    def send(self, payload, opcode=1):
+    def send(self, payload, opcode=1, split_writes=False):
         size = len(payload)
         if size < 126:
             header = bytes([0x80 | opcode, size])
@@ -253,11 +322,26 @@ class WebSocket:
         else:
             header = bytes([0x80 | opcode, 127]) + struct.pack("!Q", size)
         with self.write_lock:
-            self.handler.wfile.write(header + payload)
-            self.handler.wfile.flush()
+            if split_writes:
+                # One WebSocket message across several TCP reads, like a larger
+                # Hotwire response over TLS. Do not turn chunks into WS messages.
+                self.handler.wfile.write(header)
+                for offset in range(0, size, 4096):
+                    self.handler.wfile.write(payload[offset:offset + 4096])
+                    self.handler.wfile.flush()
+                    time.sleep(0.02)
+            else:
+                self.handler.wfile.write(header + payload)
+                self.handler.wfile.flush()
 
     def send_json(self, value):
-        self.send(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        split = self.handler.server.split_image_responses and isinstance(value.get("message"), str)
+        # ASCII escapes let the fixture split even inside an escaped Japanese
+        # character without depending on the transport's UTF-8 decoder.
+        payload = json.dumps(value, ensure_ascii=split, separators=(",", ":")).encode("utf-8")
+        if split:
+            FIXTURE.record("split_image_response", bytes=len(payload))
+        self.send(payload, split_writes=split)
 
     def read_exact(self, count):
         data = self.handler.rfile.read(count)
@@ -379,12 +463,17 @@ class Handler(BaseHTTPRequestHandler):
             self.json_response(200, {"status": "ok", "fixture": True})
             return
         if path in FIXTURE.images:
-            FIXTURE.record("image_request", path=path, has_access_token="X-Access-Token" in self.headers)
+            request = {"path": path, "has_access_token": "X-Access-Token" in self.headers,
+                       "has_authorization": "Authorization" in self.headers,
+                       "has_cookie": "Cookie" in self.headers}
+            with FIXTURE.lock:
+                FIXTURE.image_requests.append(request)
+            FIXTURE.record("image_request", **request)
             body = image_png(*FIXTURE.images[path])
             self.send_response(200)
             self.send_header("Content-Type", "image/png")
             self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "public, max-age=3600")
+            self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(body)
             return
@@ -416,7 +505,9 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/test/state":
                 value = {"records": copy.deepcopy(FIXTURE.records), "connections": len(FIXTURE.clients),
                          "subscriptions": [sorted(c.channel_ids) for c in FIXTURE.clients],
-                         "memberships": [FIXTURE.membership(c) for c in FIXTURE.channels]}
+                         "memberships": [FIXTURE.membership(c) for c in FIXTURE.channels],
+                         "image_requests": copy.deepcopy(FIXTURE.image_requests),
+                         "media_expectations": copy.deepcopy(FIXTURE.media_expectations)}
             else:
                 parts = path.strip("/").split("/")
                 is_search = len(parts) == 6 and parts[5] == "search"
@@ -531,9 +622,13 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--channel-tree", action="store_true", help="Include hierarchical channel names")
     parser.add_argument("--legacy-images", action="store_true", help="Include uploaded images whose URLs require Hotwire resume")
+    parser.add_argument("--split-image-responses", action="store_true", help="Write Hotwire WebSocket messages in multiple TCP chunks")
+    parser.add_argument("--empty-channels", action="store_true", help="Sign in with no joined channels or messages")
     args = parser.parse_args()
-    FIXTURE = Fixture(channel_tree=args.channel_tree, legacy_images=args.legacy_images, port=args.port)
+    FIXTURE = Fixture(channel_tree=args.channel_tree, legacy_images=args.legacy_images,
+                      port=args.port, empty_channels=args.empty_channels)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    server.split_image_responses = args.split_image_responses
     server.daemon_threads = True
     print(f"kokoro.io fixture: http://127.0.0.1:{args.port}  public test token: {TOKEN}", flush=True)
     try:

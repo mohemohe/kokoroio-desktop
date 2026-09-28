@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 public struct RealtimeEvent: Equatable, Sendable {
     public let name: String
@@ -266,10 +269,16 @@ public final class RealtimeClient {
         let session = URLSession(configuration: configuration, delegate: sessionDelegate, delegateQueue: nil)
         self.session = session
         let socket = session.webSocketTask(with: request)
+        #if os(Windows)
+        socket.maximumMessageSize = ActionCableMessageBuffer.maximumMessageBytes
+        #endif
         self.socket = socket
         socket.resume()
 
         receiveTask = Task { [weak self] in
+            #if os(Windows)
+            var messageBuffer = ActionCableMessageBuffer()
+            #endif
             while !Task.isCancelled {
                 do {
                     let message = try await socket.receive()
@@ -281,8 +290,14 @@ public final class RealtimeClient {
                     case .string(let value): data = Data(value.utf8)
                     @unknown default: continue
                     }
+                    #if os(Windows)
+                    for frame in try messageBuffer.append(data) {
+                        await self.receive(frame, generation: currentGeneration)
+                    }
+                    #else
                     guard let frame = try? ActionCableProtocol.parse(data) else { continue }
                     await self.receive(frame, generation: currentGeneration)
+                    #endif
                 } catch {
                     guard !Task.isCancelled, let self, self.generation == currentGeneration else { return }
                     self.connectionFailed()

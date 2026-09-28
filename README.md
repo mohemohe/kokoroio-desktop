@@ -1,6 +1,8 @@
 # Kokoro Desktop
 
-[kokoro.io](https://kokoro.io) 用の SwiftUI 製 macOS クライアントです。左にチャンネル一覧、右にチャットタイムラインと入力欄を置いた、Slack 風の 2 ペイン構成です。
+[kokoro.io](https://kokoro.io) 用のデスクトップクライアントです。macOS は SwiftUI、Windows は [swift-winrt](https://github.com/thebrowsercompany/swift-winrt) で生成した WinUI 3 バインディングを使用します。左にチャンネル一覧、右にチャットタイムラインと入力欄を置いた 2 ペイン構成です。
+
+Windows 版のビルド・起動・対応機能は [docs/windows.md](docs/windows.md) を参照してください。`pwsh` で `./scripts/build-windows.ps1 -Test -Run` を実行するとビルドして起動します。以下は macOS 版の説明です。
 
 ## 必要環境
 
@@ -40,9 +42,10 @@ Release ビルドは `CONFIGURATION=Release ./scripts/build-app.sh` で作成で
 ## GitHub Actions
 
 - **Build and Test**: ブランチへの push、PR、手動実行でテストと Universal（Apple Silicon / Intel）ビルドを実行し、開発用の ZIP・DMG を artifact に保存します。署名用 Secrets は不要です。
-- **Release**: `v1.2.3` などのタグを push すると、テスト、Developer ID 署名、Apple 公証、ZIP・DMG 作成を行い、GitHub Release の下書きに添付します。既存タグを指定した手動実行にも対応します。
+- **Windows Build and Test**: ブランチへの push、PR、手動実行で Swift 6.4 / MSVC x64 によるテストと Release ビルドを行い、ランタイム同梱の Windows ZIP とチェックサムを artifact に保存します。
+- **Release**: `v1.2.3` などのタグを push すると、同じコミットから macOS / Windows をビルドし、macOS の署名・公証済み ZIP・DMG、Windows x64 ZIP、共通のチェックサムを GitHub Release の下書きに添付します。既存タグを指定した手動実行にも対応します。
 
-最初に `awayuki-desktop` と同じ名前の署名用 Secrets 7 個を設定してください。設定内容・タグの形式・公開方法は [docs/releasing.md](docs/releasing.md) に記載しています。
+macOS の配布には `awayuki-desktop` と同じ名前の署名用 Secrets 7 個を設定してください。Windows 版は未署名で追加の Secrets は不要です。設定内容・タグの形式・公開方法は [docs/releasing.md](docs/releasing.md) に記載しています。
 
 ## 接続
 
