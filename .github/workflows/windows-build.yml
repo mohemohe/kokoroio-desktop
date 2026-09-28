@@ -1,0 +1,66 @@
+name: Build Windows package
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit to build
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+      artifact-name:
+        required: true
+        type: string
+      retention-days:
+        default: 7
+        type: number
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - name: Configure MSVC x64
+        uses: compnerd/gha-setup-vsdevenv@5eb3eae1490d4f7875d574c4973539f69109700d
+        with:
+          arch: x64
+          host_arch: x64
+      - name: Install Swift 6.4
+        uses: compnerd/gha-setup-swift@db4ffac97c2db518c2ff4f37f988af89e4411240
+        with:
+          swift-version: swift-6.4.0-release
+          swift-build: 6.4.0-RELEASE
+      - name: Generate bindings, test, and build
+        run: ./scripts/build-windows.ps1 -Configuration release -Test
+      - name: Package Windows app
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: ./scripts/package-windows.ps1 -Version $env:RELEASE_VERSION -BuildNumber $env:BUILD_NUMBER
+      - name: Verify package contents and checksum
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: ./scripts/test-windows-package.ps1 -Version $env:RELEASE_VERSION
+      - name: Upload Windows package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: |
+            build/windows/packages/${{ inputs.version }}/KokoroDesktop-${{ inputs.version }}-windows-x64.zip
+            build/windows/packages/${{ inputs.version }}/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: ${{ inputs.retention-days }}
+          compression-level: 0

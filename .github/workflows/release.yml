@@ -18,16 +18,15 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
-    name: Build, sign, and notarize
-    runs-on: macos-26
-    timeout-minutes: 120
+  version:
+    name: Resolve release tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
     defaults:
       run:
         shell: bash
     env:
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
-      NOTARY_PROFILE: kokoro-release
     outputs:
       tag: ${{ steps.version.outputs.tag }}
       version: ${{ steps.version.outputs.version }}
@@ -59,6 +58,23 @@ jobs:
             echo "prerelease=$PRERELEASE"
             echo "commit=$(git rev-parse HEAD)"
           } >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build, sign, and notarize macOS
+    needs: version
+    runs-on: macos-26
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    env:
+      NOTARY_PROFILE: kokoro-release
+    steps:
+      - name: Checkout release commit
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ needs.version.outputs.commit }}
+          persist-credentials: false
 
       - name: Select Xcode
         run: |
@@ -111,7 +127,7 @@ jobs:
 
       - name: Build, sign, notarize, and package
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.version.outputs.version }}
           BUILD_NUMBER: ${{ github.run_number }}
           SIGN_IDENTITY: ${{ secrets.MACOS_CERTIFICATE_NAME }}
         run: bash scripts/build-release.sh --signed
@@ -121,8 +137,8 @@ jobs:
         with:
           name: macos-release
           path: |
-            build/release/KokoroDesktop-${{ steps.version.outputs.version }}-universal.zip
-            build/release/KokoroDesktop-${{ steps.version.outputs.version }}-universal.dmg
+            build/release/KokoroDesktop-${{ needs.version.outputs.version }}-universal.zip
+            build/release/KokoroDesktop-${{ needs.version.outputs.version }}-universal.dmg
             build/release/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 14
@@ -136,35 +152,68 @@ jobs:
           fi
           rm -f "$RUNNER_TEMP/kokoro-certificate.p12"
 
+  windows:
+    name: Build Windows
+    needs: version
+    uses: ./.github/workflows/windows-build.yml
+    with:
+      ref: ${{ needs.version.outputs.commit }}
+      version: ${{ needs.version.outputs.version }}
+      artifact-name: windows-release
+      retention-days: 14
+
   release:
     name: Create draft GitHub Release
-    needs: build
+    needs: [version, build, windows]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write
     steps:
-      - name: Download signed artifacts
+      - name: Download macOS artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: macos-release
-          path: artifacts
+          path: artifacts/macos
 
-      - name: Verify checksums
+      - name: Download Windows artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: windows-release
+          path: artifacts/windows
+
+      - name: Verify and collect release assets
         working-directory: artifacts
-        run: sha256sum --check SHA256SUMS.txt
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          (cd macos && sha256sum --check SHA256SUMS.txt)
+          (cd windows && sha256sum --check SHA256SUMS.txt)
+          cp "macos/KokoroDesktop-$VERSION-universal.zip" .
+          cp "macos/KokoroDesktop-$VERSION-universal.dmg" .
+          cp "windows/KokoroDesktop-$VERSION-windows-x64.zip" .
+          cat macos/SHA256SUMS.txt windows/SHA256SUMS.txt > SHA256SUMS.txt
+          sha256sum --check SHA256SUMS.txt
 
       - name: Create draft release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
-          tag_name: ${{ needs.build.outputs.tag }}
-          target_commitish: ${{ needs.build.outputs.commit }}
-          name: Kokoro Desktop ${{ needs.build.outputs.tag }}
+          tag_name: ${{ needs.version.outputs.tag }}
+          target_commitish: ${{ needs.version.outputs.commit }}
+          name: Kokoro Desktop ${{ needs.version.outputs.tag }}
           draft: true
-          prerelease: ${{ needs.build.outputs.prerelease == 'true' }}
+          prerelease: ${{ needs.version.outputs.prerelease == 'true' }}
           generate_release_notes: true
+          body: |
+            - macOS: Universal ZIP または DMG（Apple Silicon / Intel）
+            - Windows: windows-x64.zip をすべて展開し、KokoroDesktop.exe を起動してください。
+
+            Windows 版には [Windows App Runtime 1.7 x64](https://aka.ms/windowsappsdk/1.7/1.7.250909003/windowsappruntimeinstall-x64.exe) が必要です。
+            Swift・Visual Studio は不要です。Windows 版は未署名です。詳しい起動手順は ZIP 内の README.md を参照してください。
+            ダウンロードしたファイルの SHA-256 は SHA256SUMS.txt で確認できます。
           fail_on_unmatched_files: true
           files: |
-            artifacts/KokoroDesktop-${{ needs.build.outputs.version }}-universal.zip
-            artifacts/KokoroDesktop-${{ needs.build.outputs.version }}-universal.dmg
+            artifacts/KokoroDesktop-${{ needs.version.outputs.version }}-universal.zip
+            artifacts/KokoroDesktop-${{ needs.version.outputs.version }}-universal.dmg
+            artifacts/KokoroDesktop-${{ needs.version.outputs.version }}-windows-x64.zip
             artifacts/SHA256SUMS.txt

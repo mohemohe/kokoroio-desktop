@@ -107,5 +107,9 @@ public struct UploadedImageFallback {
         unavailable = true
     }
 
+    /// Search changes the visible messages, not the connection or the source of
+    /// already resolved images. Cancel the old batch without dropping that cache.
+    public mutating func cancelPendingRequest() { pending = nil }
+
     public mutating func reset() { self = Self() }
 }

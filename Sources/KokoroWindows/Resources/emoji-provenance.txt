@@ -1,0 +1,10 @@
+emoji.json is the emoji-data snapshot bundled by swift-emoji 0.1.1,
+matching the macOS application's emoji catalog, shortcodes and skin variations.
+
+Source: https://github.com/klaaspieter/swift-emoji/tree/0.1.1/Sources/EmojiData/Resources
+Upstream data: https://github.com/iamcal/emoji-data
+Upstream data license: emoji-LICENSE.txt (MIT, Cal Henderson)
+SHA-256: b205919228bbfb87b4747b3f7010a8a585b21b9a0da55416f6275bdba5e32d5d
+
+No emoji image assets or fonts from emoji-data are included. Windows renders the
+Unicode characters using its native emoji font.

@@ -107,6 +107,28 @@ final class UploadedImageFallbackTests: XCTestCase {
         XCTAssertEqual(fallback.nextRequest(in: [selected])?.channelID, "CHANNEL02")
     }
 
+    func testSearchSwitchKeepsResolvedImagesAndRejectsCancelledResponse() {
+        var fallback = UploadedImageFallback()
+        let timeline = message(122, count: 2)
+        _ = fallback.nextRequest(in: [timeline])
+        XCTAssertTrue(fallback.accept([record(122, count: 2)], currentMessages: [timeline]))
+        let searchResult = message(20)
+        XCTAssertEqual(fallback.nextRequest(in: [searchResult])?.afterID, 19)
+
+        fallback.cancelPendingRequest()
+        XCTAssertFalse(fallback.accept([record(20)], currentMessages: [searchResult]))
+        XCTAssertTrue(fallback.applying(to: timeline).embedContents.allSatisfy { !$0.hasUnavailableImage })
+        XCTAssertNil(fallback.nextRequest(in: [timeline]), "Returning to the timeline must not refetch resolved images")
+
+        var changed = timeline
+        changed.nsfw = true
+        XCTAssertTrue(fallback.applying(to: changed).embedContents.allSatisfy(\.hasUnavailableImage),
+                      "Cached addresses must never override changed media restrictions")
+        XCTAssertEqual(fallback.nextRequest(in: [searchResult])?.afterID, 19)
+        fallback.reset()
+        XCTAssertTrue(fallback.applying(to: timeline).embedContents.allSatisfy(\.hasUnavailableImage))
+    }
+
     private func message(_ id: Int, count: Int = 1) -> Message {
         Message(id: id, embedContents: (0..<count).map { EmbedContent(position: $0, data: EmbedData(type: "UploadedImage")) },
                 channel: Channel(id: "CHANNEL01", channelName: "general"), profile: Profile(id: "PROFILE01"))
