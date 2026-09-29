@@ -200,7 +200,10 @@ final class WindowsComposerView {
             preview.width = 76
             preview.height = 64
             preview.stretch = .uniformToFill
-            let bitmap = BitmapImage(Uri(image.localURL.absoluteString))
+            let bitmap = BitmapImage()
+            bitmap.autoPlay = false
+            bitmap.decodePixelWidth = 152
+            bitmap.uriSource = Uri(image.localURL.absoluteString)
             preview.source = bitmap
             frame.child = preview
             thumbnail.children.append(frame)

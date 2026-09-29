@@ -337,6 +337,9 @@ final class TimelineMessageView {
         retainedElements.append(image)
         imageControls.append(image)
         let bitmap = BitmapImage()
+        // Thumbnails (including offscreen avatars) must not keep decoding GIF
+        // frames. The original animation remains available through its link.
+        bitmap.autoPlay = false
         // Decode at thumbnail scale and reserve dimensions before loading, keeping scroll position stable.
         bitmap.decodePixelWidth = Int32(width * 2)
         bitmaps.append(bitmap)

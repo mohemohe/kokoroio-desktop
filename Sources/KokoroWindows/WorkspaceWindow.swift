@@ -1,9 +1,11 @@
 import Foundation
+import FoundationNetworking
 import KokoroCore
 import KokoroWindowsState
 import UWP
 import WinUI
 import WindowsFoundation
+import WindowsNative
 
 @MainActor
 final class WorkspaceWindow {
@@ -37,6 +39,17 @@ final class WorkspaceWindow {
     private var pendingNotificationChannel: String?
     private var refreshTask: Task<Void, Never>?
     private var messageRows: [TimelineMessageView] = []
+    private var timelineElements: [FrameworkElement] = []
+    private var daySeparators: [Int: (date: Date, element: FrameworkElement)] = [:]
+    private var timelineMutationCount = 0
+    private struct HeadingState: Equatable {
+        let channelID: String?, name: String?, description: String?
+        let direct: Bool, hasMore: Bool, loading: Bool, searching: Bool, search: Bool, empty: Bool
+        let error: String?
+        let resultCount: Int?
+    }
+    private var headingState: HeadingState?
+    private var refreshIconSearchState: Bool?
     private var parents: [Panel] = []
     private var contentParents: [ContentControl] = []
     private var emptyConversation: FrameworkElement?
@@ -47,7 +60,8 @@ final class WorkspaceWindow {
         if CommandLine.arguments.contains("--smoke-test") {
             let images = WindowsSmokeImageService()
             smokeImages = images
-            store = WindowsChatStore(defaults: UserDefaults(suiteName: "KokoroDesktop.smoke.\(UUID())")!, imageService: images)
+            store = WindowsChatStore(usesRealtime: !CommandLine.arguments.contains("--smoke-no-realtime"),
+                defaults: UserDefaults(suiteName: "KokoroDesktop.smoke.\(UUID())")!, imageService: images)
         } else {
             smokeImages = nil
             store = WindowsChatStore()
@@ -279,12 +293,14 @@ final class WorkspaceWindow {
         renderedSearchOpen = store.isSearchOpen
         let signedIn = store.profile != nil
         if signedIn != signedInLayout {
+            headingState = nil; refreshIconSearchState = nil
             window.content = nil; contentParents.forEach { $0.content = nil }; contentParents = []
             parents.forEach { $0.children.clear() }; parents = []; sidebar?.dispose(); sidebar = nil; signedInLayout = signedIn
             if signedIn { buildWorkspace() }
             else {
                 renderedChannel = nil; renderedMessages = []; renderedSearch = false
-                messageRows.forEach { $0.dispose() }; messageRows = []; timeline.children.clear(); composer.text = ""; buildLogin()
+                messageRows.forEach { $0.dispose() }; messageRows = []; timeline.children.clear()
+                timelineElements = []; daySeparators = [:]; composer.text = ""; buildLogin()
             }
         }
         login.isEnabled = !store.isSigningIn && !token.password.isEmpty; loginLabel.text = store.isSigningIn ? "接続中…" : "接続する"
@@ -304,7 +320,10 @@ final class WorkspaceWindow {
         searchPanel.visibility = store.isSearchOpen ? .visible : .collapsed; searchButton.visibility = store.isSearchOpen ? .collapsed : .visible
         if messageSearch.text != store.searchQuery { messageSearch.text = store.searchQuery }
         submitSearch.isEnabled = store.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).count >= 2 && !store.isSearching
-        configureIconButton(refreshButton, glyph: store.isSearchOpen ? "\u{E711}" : "\u{E72C}", label: store.isSearchOpen ? "検索を閉じる" : "最新のメッセージを取得")
+        if refreshIconSearchState != store.isSearchOpen {
+            refreshIconSearchState = store.isSearchOpen
+            configureIconButton(refreshButton, glyph: store.isSearchOpen ? "\u{E711}" : "\u{E72C}", label: store.isSearchOpen ? "検索を閉じる" : "最新のメッセージを取得")
+        }
         errorBanner.visibility = store.error == nil ? .collapsed : .visible
         more.isEnabled = store.hasMore && !store.isLoading; historyLabel.text = store.isLoading ? "読み込み中…" : "↑ 以前のメッセージを読み込む"
         historySpinner.isActive = store.isLoading; historySpinner.visibility = store.isLoading ? .visible : .collapsed
@@ -315,24 +334,59 @@ final class WorkspaceWindow {
             let follow = !store.isShowingSearchResults && (changedChannel || changedSearch || store.isAtBottom || messages.last?.profile.id == store.profile?.id)
             var reusable: [Int: (Message, TimelineMessageView)] = [:]
             for (message, row) in zip(renderedMessages, messageRows) { reusable[message.id] = (message, row) }
-            renderedChannel = store.selectedChannelID; renderedMessages = messages; renderedSearch = store.isShowingSearchResults; messageRows = []; timeline.children.clear()
+            renderedChannel = store.selectedChannelID; renderedMessages = messages; renderedSearch = store.isShowingSearchResults; messageRows = []
+            var elements: [FrameworkElement] = []
+            var separators: [Int: (date: Date, element: FrameworkElement)] = [:]
             for (index, message) in messages.enumerated() {
                 let startsDay = index == 0 || !Calendar.current.isDate(messages[index - 1].publishedAt, inSameDayAs: message.publishedAt)
                 let grouped = index > 0 && !startsDay && !message.isDeleted && !messages[index - 1].isDeleted && messages[index - 1].profile.id == message.profile.id && message.publishedAt.timeIntervalSince(messages[index - 1].publishedAt) < 300
-                if startsDay { timeline.children.append(daySeparator(message.publishedAt)) }
+                if startsDay {
+                    let existing = daySeparators[message.id]
+                    let separator = existing?.date == message.publishedAt ? existing!.element : daySeparator(message.publishedAt)
+                    separators[message.id] = (message.publishedAt, separator); elements.append(separator)
+                }
                 let row: TimelineMessageView, existing = reusable.removeValue(forKey: message.id)
                 if let existing, existing.0 == message, existing.1.isGrouped == grouped { row = existing.1 }
                 else {
                     existing?.1.dispose(); row = TimelineMessageView(message: message, isGrouped: grouped) { [weak self] in guard let self, store.isAtBottom, !store.isShowingSearchResults else { return }; scrollToBottom() }
                 }
-                messageRows.append(row); timeline.children.append(row.element)
+                messageRows.append(row); elements.append(row.element)
             }
+            reconcileTimeline(elements)
+            daySeparators = separators
             reusable.values.forEach { $0.1.dispose() }
             if follow { scrollToBottom() } else if changedSearch { _ = try? scroll.changeView(nil, 0, nil, true) }
         }
         applyWorkspaceTheme(); updateTimelineActions(); if store.isAtBottom && !store.isSearchOpen { Task { await store.markRead() } }
     }
+    /// Preserve attached controls and their layout/selection when a message is
+    /// appended or updated. Clearing the collection reloads every native row.
+    private func reconcileTimeline(_ elements: [FrameworkElement]) {
+        let retained = Set(elements.map(ObjectIdentifier.init))
+        for index in timelineElements.indices.reversed() where !retained.contains(ObjectIdentifier(timelineElements[index])) {
+            timeline.children.removeAt(UInt32(index)); timelineElements.remove(at: index)
+            timelineMutationCount += 1
+        }
+        for (index, element) in elements.enumerated() {
+            if index < timelineElements.count, timelineElements[index] === element { continue }
+            if let previous = timelineElements[index...].firstIndex(where: { $0 === element }) {
+                // Native move preserves the control itself, including its selection.
+                try? timeline.children.move(UInt32(previous), UInt32(index))
+                timelineElements.remove(at: previous); timelineElements.insert(element, at: index)
+            } else {
+                timeline.children.insertAt(UInt32(index), element); timelineElements.insert(element, at: index)
+            }
+            timelineMutationCount += 1
+        }
+    }
     private func renderTimelineHeading() {
+        let channel = store.selectedChannel
+        let next = HeadingState(channelID: channel?.id, name: channel?.name, description: channel?.description,
+            direct: channel?.isDirectMessage == true, hasMore: store.hasMore, loading: store.isLoading,
+            searching: store.isSearching, search: store.isShowingSearchResults, empty: store.messages.isEmpty,
+            error: store.searchError, resultCount: store.searchResults?.count)
+        guard headingState != next else { return }
+        headingState = next
         intro.children.clear(); timelineHeading.children.clear()
         intro.visibility = !store.isShowingSearchResults && !store.hasMore && !(store.isLoading && store.messages.isEmpty) ? .visible : .collapsed
         intro.spacing = 10; intro.margin = .init(left: 26, top: 17, right: 26, bottom: 23)
@@ -441,6 +495,60 @@ final class WorkspaceWindow {
             store.signOut(); print("Windows empty-workspace smoke test passed"); try? window.close(); isClosed = true; return
         }
         check(!store.messages.isEmpty && messageRows.count == store.displayedMessages.count, "native timeline")
+        if CommandLine.arguments.contains("--smoke-performance") {
+            scrollToBottom()
+            try? await Task.sleep(for: .seconds(3))
+            let pumps = KokoroMessagePumpCount(), cpu = KokoroProcessCPUSeconds(), mainCPU = KokoroThreadCPUSeconds(), started = Date()
+            try? await Task.sleep(for: .seconds(5))
+            let duration = Date().timeIntervalSince(started)
+            print("Windows idle: \(KokoroMessagePumpCount() - pumps) pumps / \(duration)s, CPU \((KokoroProcessCPUSeconds() - cpu) / duration * 100)% of one core")
+            print("UI thread CPU: \((KokoroThreadCPUSeconds() - mainCPU) / duration * 100)% of one core")
+            check(duration < 5.5, "Swift task wakes promptly from idle")
+            check(KokoroMessagePumpCount() - pumps < 100, "idle loop waits instead of polling")
+            check((KokoroProcessCPUSeconds() - cpu) / duration < 0.2, "idle CPU stays below 20% of one core")
+            let mutations = timelineMutationCount
+            for _ in 0..<20 { render() }
+            check(timelineMutationCount == mutations, "unchanged timeline has no native mutations")
+            let priorRows = messageRows
+            store.draft = "Performance append"; await store.send()
+            check(messageRows.count == priorRows.count + 1, "append adds one row")
+            check(zip(priorRows, messageRows).allSatisfy { $0 === $1 }, "append retains all existing rows")
+            check(timelineMutationCount - mutations <= 2, "append only inserts its row and optional date")
+            let olderRows = messageRows, olderIDs = renderedMessages.map(\.id)
+            await loadOlder()
+            for (id, row) in zip(olderIDs.dropFirst(), olderRows.dropFirst()) {
+                check(renderedMessages.firstIndex(where: { $0.id == id }).map { messageRows[$0] === row } == true,
+                    "history prepend retains existing rows except changed grouping at boundary")
+            }
+            if !CommandLine.arguments.contains("--smoke-no-realtime") {
+                check(store.connectionLabel == "接続済み", "native WebSocket connected")
+                func post(_ path: String, body: [String: String] = [:]) async {
+                    var request = URLRequest(url: URL(string: "http://127.0.0.1:8765/test/" + path)!)
+                    request.httpMethod = "POST"
+                    request.setValue("test-token", forHTTPHeaderField: "X-Access-Token")
+                    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+                    do { _ = try await URLSession.shared.data(for: request) }
+                    catch { check(false, "fixture request: \(error)") }
+                }
+                await post("disconnect")
+                try? await Task.sleep(for: .milliseconds(300))
+                for _ in 0..<100 {
+                    if store.connectionLabel == "接続済み" { break }
+                    try? await Task.sleep(for: .milliseconds(50))
+                }
+                check(store.connectionLabel == "接続済み", "native WebSocket reconnects")
+                let marker = "分割された日本語と😀 " + UUID().uuidString
+                await post("publish", body: ["channel_id": store.selectedChannelID!, "content": marker])
+                for _ in 0..<100 {
+                    if store.messages.contains(where: { $0.text == marker }) { break }
+                    try? await Task.sleep(for: .milliseconds(50))
+                }
+                check(store.messages.contains(where: { $0.text == marker }), "realtime UTF-8 message after reconnect")
+            }
+            print("Windows performance regression checks passed")
+            store.signOut(); try? window.close(); isClosed = true; return
+        }
         if let row = messageRows.first(where: { $0.renderedText.contains("リンク内画像") }) {
             check(row.hasRichText && row.isGrouped, "Markdown and adjacent author grouping")
             check(row.renderedText.contains("🎉") && row.renderedText.contains("🙏🏿") && row.renderedText.contains("@Hana"), "chat references and emoji shortcode rendering")

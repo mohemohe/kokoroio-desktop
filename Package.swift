@@ -10,10 +10,12 @@ let uiDependencies: [Package.Dependency] = [
     .package(url: "https://github.com/scinfu/SwiftSoup.git", exact: "2.13.9"),
     .package(url: "https://github.com/swiftlang/swift-markdown.git", exact: "0.9.0")
 ]
-let coreDependencies: [Target.Dependency] = [.product(name: "SwiftSoup", package: "SwiftSoup")]
+let coreDependencies: [Target.Dependency] = [.product(name: "SwiftSoup", package: "SwiftSoup"), "WindowsWebSocketNative"]
 let coreExcludes = ["MessageMarkdown.swift"]
 let testExcludes = ["MessageMarkdownTests.swift"]
 let desktopTargets: [Target] = [
+    .target(name: "WindowsWebSocketNative", path: "Windows/WebSocket", publicHeadersPath: "include",
+            linkerSettings: [.linkedLibrary("winhttp")]),
     .target(name: "WindowsNative", path: "Windows/Native", publicHeadersPath: "include",
             linkerSettings: [.linkedLibrary("runtimeobject"), .linkedLibrary("advapi32"), .linkedLibrary("user32"),
                              .linkedLibrary("comdlg32"), .linkedLibrary("comctl32"), .linkedLibrary("imm32")]),

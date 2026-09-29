@@ -117,11 +117,14 @@ Markdown 内の画像記法はリンクとして表示し、画像プレビュ�
 サムネイルをクリックするとブラウザで元画像を開きます。embed はサーバーが返す
 タイトル・説明・画像をネイティブのカードで表示し、HTML は実行しません。
 画像 URL のない旧サーバーでは、認証済み WebSocket から得る Hotwire 差分を解析して添付画像を補完します。
-Windows の FoundationNetworking が大きな WebSocket 応答を分割して返す場合も、
-JSON 全体を組み立ててから解析します。受信バッファの上限は 8 MiB とし、再接続時に破棄します。
+Windows の WebSocket は OS 標準の WinHTTP を使用し、受信待ちには完了通知を使用します。
+分割されたフレームは UTF-8 の文字境界に関係なく組み立ててから JSON を解析します。
+受信バッファの上限は 8 MiB とし、再接続時に破棄します。
 センシティブな画像・embed は「センシティブなメディアを表示」を押すまで読み込まず、
 削除済みメッセージの添付画像は読み込みません。アバターを取得できない場合はイニシャルを表示します。
 画像の取得には kokoro.io のアクセストークンを付けません。
+アバター・添付画像・投稿欄のプレビューは縮小デコードし、アニメーションは自動再生しません。
+添付画像の元ファイルは従来どおりリンクから開けます。
 
 ## 画像アップロードの設定
 
@@ -191,9 +194,45 @@ OS 全体へキーを送る検証は行いません。
 - `Sources/KokoroWindowsState`: UI 非依存の状態管理と通信競合の防止
 - `Sources/KokoroWindows`: WinUI の画面、Markdown 描画、通知、実行時 UI 監査と起動処理
 - `Windows/Native`: App Runtime の bootstrap、Windows メッセージループ、資格情報マネージャー、画像選択、OS 絵文字パネルとウィンドウ操作
+- `Windows/WebSocket`: WinHTTP の非同期 WebSocket と、送受信・キャンセルの完了待機
 - `Windows/Generated`: 自動生成した各 DLL の Swift パッケージ（Git 管理対象外）
 
 WinRT パッケージは DLL ごとに分離し、SwiftPM の product 依存でリンクします。
 これにより、同じ型の重複リンクと Windows の DLL エクスポート数上限を避けます。
 WinUI と Swift の非同期処理が同じ UI スレッドで動くよう、Windows メッセージループと
 Foundation RunLoop の両方を処理します。
+Swift 6.4 の libdispatch が公開するキュー通知イベントと Windows メッセージをまとめて待ち、
+10ms ごとの定期ポーリングを避けます。Foundation の次のタイマー期限も考慮し、他の
+RunLoop ソースのために待機の上限を 1 秒とします。将来のランタイムで通知イベントが
+取得できない場合は従来の 10ms 待機に戻ります。
+
+## CPU 使用率の検証
+
+```powershell
+./scripts/build-windows.ps1 -SkipGenerate -OutputName cpu-fix -Test
+./scripts/test-windows-smoke.ps1 -OutputName cpu-fix -Performance -Python 'C:/path/to/python.exe'
+# リアルタイム通信を除いた同じ画面との比較
+./scripts/test-windows-smoke.ps1 -OutputName cpu-fix -Performance -NoRealtime -Python 'C:/path/to/python.exe'
+```
+
+ローカル fixture に接続し、安定待ち 3 秒の後、5 秒間のプロセス CPU 時間・UI スレッド CPU 時間・
+メインループ回数を測ります。CPU は論理コア数で割らず、1 コアを 100% とする値です。
+20% 以上の待機 CPU、5 秒間に 100 回以上のループ、Swift Task の大幅な起床遅延を失敗にします。
+併せて、同じ状態の再描画、新着追加・履歴追加で既存行を保持すること、サーバー切断からの再接続、
+日本語・絵文字を含む WebSocket 継続フレームの受信を検証します。
+
+2026-09-29 の調査では、修正前の待機 CPU は約 84%、メインループは 5 秒に 323 回でした。
+描画とメインループのみの修正後は 8 回まで減りましたが、CPU は約 67% 残り、
+同じ画面でリアルタイム通信を無効にすると約 0.3% になりました。
+この切り分けから Windows の FoundationNetworking WebSocket 経路を WinHTTP に置き換えました。
+置き換え後は同じ Debug ビルド・ローカル fixture で CPU 0.0%（5 秒の計測精度内）、
+UI スレッド CPU 0.0%、メインループ 6 回となり、性能の回帰検証も成功しました。
+119 件の自動テスト、通常・チャンネルなしの WinUI smoke test、画像取得の検証も成功しています。
+REST 通信と macOS の WebSocket 実装は従来どおりです。
+
+タイムラインは変更された行と日付区切りだけを挿入・削除し、全行の付け直しを避けます。
+見出しとサイドバーは表示に使う値が変わったときに更新します。
+実環境の値はメッセージ数、画像、OS、ビルド構成で変わるため、本番サーバーでの計測とは区別してください。
+
+待機処理の参照: [Swift libdispatch のキュー実装](https://github.com/swiftlang/swift-corelibs-libdispatch/blob/swift-6.4-RELEASE/src/queue.c)、
+[WinHTTP の並行処理・キャンセル規則](https://learn.microsoft.com/en-us/windows/win32/winhttp/concurrency-in-winhttp)。

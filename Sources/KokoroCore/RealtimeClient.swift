@@ -168,7 +168,11 @@ public final class RealtimeClient {
     private var request: URLRequest?
     private var channelIDs: [String] = []
     private var session: URLSession?
+    #if os(Windows)
+    private var socket: WindowsWebSocket?
+    #else
     private var socket: URLSessionWebSocketTask?
+    #endif
     private var receiveTask: Task<Void, Never>?
     private var watchdogTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
@@ -261,6 +265,9 @@ public final class RealtimeClient {
         state = .connecting
         lastFrameAt = Date()
 
+        #if os(Windows)
+        let socket = WindowsWebSocket(request: request)
+        #else
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpCookieStorage = nil
         configuration.httpShouldSetCookies = false
@@ -269,8 +276,6 @@ public final class RealtimeClient {
         let session = URLSession(configuration: configuration, delegate: sessionDelegate, delegateQueue: nil)
         self.session = session
         let socket = session.webSocketTask(with: request)
-        #if os(Windows)
-        socket.maximumMessageSize = ActionCableMessageBuffer.maximumMessageBytes
         #endif
         self.socket = socket
         socket.resume()

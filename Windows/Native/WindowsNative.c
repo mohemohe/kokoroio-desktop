@@ -288,7 +288,27 @@ uint32_t KokoroShowEmojiPanel(void) {
     return error ? error : ERROR_GEN_FAILURE;
 }
 
+static uint64_t messagePumpCount;
+uint64_t KokoroMessagePumpCount(void) { return messagePumpCount; }
+double KokoroProcessCPUSeconds(void) {
+    FILETIME created, exited, kernel, user;
+    if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user)) return 0;
+    ULARGE_INTEGER k, u;
+    k.LowPart = kernel.dwLowDateTime; k.HighPart = kernel.dwHighDateTime;
+    u.LowPart = user.dwLowDateTime; u.HighPart = user.dwHighDateTime;
+    return (double)(k.QuadPart + u.QuadPart) / 10000000.0;
+}
+double KokoroThreadCPUSeconds(void) {
+    FILETIME created, exited, kernel, user;
+    if (!GetThreadTimes(GetCurrentThread(), &created, &exited, &kernel, &user)) return 0;
+    ULARGE_INTEGER k, u;
+    k.LowPart = kernel.dwLowDateTime; k.HighPart = kernel.dwHighDateTime;
+    u.LowPart = user.dwLowDateTime; u.HighPart = user.dwHighDateTime;
+    return (double)(k.QuadPart + u.QuadPart) / 10000000.0;
+}
+
 int32_t KokoroPumpMessages(void) {
+    ++messagePumpCount;
     typedef BOOL (WINAPI *PreTranslateFn)(const MSG *);
     static PreTranslateFn preTranslate;
     if (!preTranslate) {
@@ -296,7 +316,8 @@ int32_t KokoroPumpMessages(void) {
         if (windowing) preTranslate = (PreTranslateFn)GetProcAddress(windowing, "ContentPreTranslateMessage");
     }
     MSG message;
-    while (PeekMessageW(&message, NULL, 0, 0, PM_REMOVE)) {
+    // Yield to Swift even during a sustained stream of native messages.
+    for (unsigned count = 0; count < 256 && PeekMessageW(&message, NULL, 0, 0, PM_REMOVE); ++count) {
         if (message.message == WM_QUIT) return 0;
         if (!preTranslate || !preTranslate(&message)) {
             TranslateMessage(&message);
@@ -306,7 +327,32 @@ int32_t KokoroPumpMessages(void) {
     return 1;
 }
 
-void KokoroWaitForMessages(void) {
-    // Bound the wait so Swift's main dispatch queue also makes progress.
-    MsgWaitForMultipleObjectsEx(0, NULL, 10, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+void KokoroWaitForMessages(uint32_t timeoutMilliseconds) {
+    // Swift 6.4's dispatch.dll exposes the auto-reset event that CoreFoundation
+    // waits on. libdispatch owns its lifetime; never close this borrowed handle.
+    typedef HANDLE (*MainQueueHandleFn)(void);
+    static HANDLE mainQueueEvent;
+    static BOOL resolved;
+    if (!resolved) {
+        HMODULE dispatch = GetModuleHandleW(L"dispatch.dll");
+        MainQueueHandleFn getHandle = dispatch ? (MainQueueHandleFn)GetProcAddress(
+            dispatch, "_dispatch_get_main_queue_handle_4CF") : NULL;
+        if (getHandle) mainQueueEvent = getHandle();
+        resolved = TRUE;
+    }
+    // Respect Foundation's next timer deadline. The caller caps this at one
+    // second for other RunLoop sources; keep the old bounded fallback if a
+    // future runtime removes this SPI, so async work cannot become stuck.
+    DWORD timeout = mainQueueEvent ? timeoutMilliseconds : min(timeoutMilliseconds, 10);
+    DWORD result = MsgWaitForMultipleObjectsEx(mainQueueEvent ? 1 : 0,
+        mainQueueEvent ? &mainQueueEvent : NULL, timeout, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+    if (mainQueueEvent && result == WAIT_OBJECT_0) {
+        // Our wait consumed the auto-reset signal. Hand it back so the next
+        // Foundation RunLoop pass can observe it and drain DispatchQueue.main.
+        SetEvent(mainQueueEvent);
+    }
+    if (result == WAIT_FAILED) {
+        mainQueueEvent = NULL;
+        Sleep(10); // A failed wait must never turn into a busy loop.
+    }
 }

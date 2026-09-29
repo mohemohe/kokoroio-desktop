@@ -41,8 +41,10 @@ struct KokoroDesktop {
             try workspace.show()
             withExtendedLifetime((queue, application, xaml, workspace)) {
                 while !workspace.isClosed && KokoroPumpMessages() != 0 {
-                    _ = RunLoop.main.limitDate(forMode: .default)
-                    KokoroWaitForMessages()
+                    let deadline = RunLoop.main.limitDate(forMode: .default)
+                    if workspace.isClosed { break }
+                    let milliseconds = min(1000, max(0, ((deadline?.timeIntervalSinceNow ?? 1) * 1000).rounded(.up)))
+                    KokoroWaitForMessages(UInt32(milliseconds))
                 }
                 workspace.shutdown()
             }

@@ -313,35 +313,39 @@ class WebSocket:
         self.channel_ids = set()
         self.subscribed = False
 
-    def send(self, payload, opcode=1, split_writes=False):
-        size = len(payload)
-        if size < 126:
-            header = bytes([0x80 | opcode, size])
-        elif size <= 65535:
-            header = bytes([0x80 | opcode, 126]) + struct.pack("!H", size)
-        else:
-            header = bytes([0x80 | opcode, 127]) + struct.pack("!Q", size)
+    def send(self, payload, opcode=1, split_writes=False, fragmented=False):
+        chunks = [payload[index:index + 257] for index in range(0, len(payload), 257)] if fragmented else [payload]
         with self.write_lock:
-            if split_writes:
-                # One WebSocket message across several TCP reads, like a larger
-                # Hotwire response over TLS. Do not turn chunks into WS messages.
-                self.handler.wfile.write(header)
-                for offset in range(0, size, 4096):
-                    self.handler.wfile.write(payload[offset:offset + 4096])
+            for index, chunk in enumerate(chunks):
+                size = len(chunk)
+                first = (0x80 if index == len(chunks) - 1 else 0) | (opcode if index == 0 else 0)
+                if size < 126:
+                    header = bytes([first, size])
+                elif size <= 65535:
+                    header = bytes([first, 126]) + struct.pack("!H", size)
+                else:
+                    header = bytes([first, 127]) + struct.pack("!Q", size)
+                if split_writes:
+                    self.handler.wfile.write(header)
+                    for offset in range(0, size, 4096):
+                        self.handler.wfile.write(chunk[offset:offset + 4096])
+                        self.handler.wfile.flush()
+                        time.sleep(0.02)
+                else:
+                    self.handler.wfile.write(header + chunk)
                     self.handler.wfile.flush()
-                    time.sleep(0.02)
-            else:
-                self.handler.wfile.write(header + payload)
-                self.handler.wfile.flush()
 
     def send_json(self, value):
         split = self.handler.server.split_image_responses and isinstance(value.get("message"), str)
         # ASCII escapes let the fixture split even inside an escaped Japanese
         # character without depending on the transport's UTF-8 decoder.
-        payload = json.dumps(value, ensure_ascii=split, separators=(",", ":")).encode("utf-8")
-        if split:
+        fragmented = self.handler.server.fragment_websockets
+        payload = json.dumps(value, ensure_ascii=split and not fragmented, separators=(",", ":")).encode("utf-8")
+        if split and not fragmented:
             FIXTURE.record("split_image_response", bytes=len(payload))
-        self.send(payload, split_writes=split)
+        if fragmented:
+            FIXTURE.record("fragmented_websocket_message", bytes=len(payload))
+        self.send(payload, split_writes=split and not fragmented, fragmented=fragmented)
 
     def read_exact(self, count):
         data = self.handler.rfile.read(count)
@@ -623,12 +627,14 @@ if __name__ == "__main__":
     parser.add_argument("--channel-tree", action="store_true", help="Include hierarchical channel names")
     parser.add_argument("--legacy-images", action="store_true", help="Include uploaded images whose URLs require Hotwire resume")
     parser.add_argument("--split-image-responses", action="store_true", help="Write Hotwire WebSocket messages in multiple TCP chunks")
+    parser.add_argument("--fragment-websockets", action="store_true", help="Split UTF-8 JSON across WebSocket continuation frames")
     parser.add_argument("--empty-channels", action="store_true", help="Sign in with no joined channels or messages")
     args = parser.parse_args()
     FIXTURE = Fixture(channel_tree=args.channel_tree, legacy_images=args.legacy_images,
                       port=args.port, empty_channels=args.empty_channels)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     server.split_image_responses = args.split_image_responses
+    server.fragment_websockets = args.fragment_websockets
     server.daemon_threads = True
     print(f"kokoro.io fixture: http://127.0.0.1:{args.port}  public test token: {TOKEN}", flush=True)
     try:

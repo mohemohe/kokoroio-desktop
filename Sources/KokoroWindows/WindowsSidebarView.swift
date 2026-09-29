@@ -9,6 +9,13 @@ import WindowsFoundation
 final class WindowsSidebarView {
     private struct RowID: Equatable { let channelID: String; let pinned: Bool }
     private struct GroupID: Hashable { let section: String; let node: ChannelTreeNode.ID }
+    private struct ChannelAppearance: Equatable {
+        let id: String, name: String, kind: String
+        let unread: Int
+        init(_ channel: Channel) {
+            id = channel.id; name = channel.name; kind = channel.kind; unread = channel.unreadCount
+        }
+    }
     private let store: WindowsChatStore
     private let onSelect: (String) -> Void
     private let root = Grid(), list = StackPanel(), footer = Grid()
@@ -27,7 +34,7 @@ final class WindowsSidebarView {
     private var primaryForeground: SolidColorBrush?
     private var avatarImage: Image?, avatarInitials: TextBlock?
     private var avatarBitmap: BitmapImage?
-    private var renderedChannels: [Channel] = []
+    private var renderedChannels: [ChannelAppearance] = []
     private var renderedPins: Set<String> = []
     private var renderedSelection: String?
     private var renderedFilter = ""
@@ -157,21 +164,24 @@ final class WindowsSidebarView {
         let total = store.channels.reduce(0) { $0 + $1.unreadCount }
         unreadCount.text = total > 99 ? "99+" : String(total)
         unreadBadge.visibility = total > 0 ? .visible : .collapsed
-        connection.text = store.connectionLabel
-        connectionDot.foreground = SolidColorBrush(store.connectionLabel == "接続済み"
-            ? .init(a: 255, r: 57, g: 166, b: 77) : .init(a: 255, r: 230, g: 145, b: 40))
+        if connection.text != store.connectionLabel {
+            connection.text = store.connectionLabel
+            connectionDot.foreground = SolidColorBrush(store.connectionLabel == "接続済み"
+                ? .init(a: 255, r: 57, g: 166, b: 77) : .init(a: 255, r: 230, g: 145, b: 40))
+        }
         if renderedProfile != store.profile {
             renderedProfile = store.profile
             accountName.text = store.profile?.displayName ?? ""
             accountHandle.text = store.profile.map { "@" + $0.screenName } ?? ""
             updateAvatar()
         }
+        let appearances = store.channels.map(ChannelAppearance.init)
         let selectionChanged = renderedSelection != store.selectedChannelID
-        let channelListChanged = renderedChannels.map(\.id) != store.channels.map(\.id)
-        guard needsRows || renderedChannels != store.channels || renderedPins != store.pinnedChannelIDs ||
+        let channelListChanged = renderedChannels.map(\.id) != appearances.map(\.id)
+        guard needsRows || renderedChannels != appearances || renderedPins != store.pinnedChannelIDs ||
             selectionChanged || renderedFilter != search.text || renderedUnreadOnly != unreadOnly else { return }
         if selectionChanged || channelListChanged { revealSelectedChannel() }
-        renderedChannels = store.channels; renderedPins = store.pinnedChannelIDs
+        renderedChannels = appearances; renderedPins = store.pinnedChannelIDs
         renderedSelection = store.selectedChannelID; renderedFilter = search.text; renderedUnreadOnly = unreadOnly
         needsRows = false
         rowEvents.forEach { $0.dispose() }; rowEvents.removeAll(); rowElements.removeAll()
@@ -368,6 +378,7 @@ final class WindowsSidebarView {
         avatarImage = image
         avatarHost.children.append(image)
         let bitmap = BitmapImage(); bitmap.decodePixelWidth = 66; avatarBitmap = bitmap
+        bitmap.autoPlay = false
         avatarEvents.append(bitmap.imageOpened.addHandler { [weak image, weak initials] _, _ in image?.opacity = 1; initials?.visibility = .collapsed })
         image.source = bitmap; bitmap.uriSource = Uri(url.absoluteString)
     }

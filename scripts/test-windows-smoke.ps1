@@ -3,7 +3,9 @@ param(
     [string]$Python = 'python',
     [ValidateSet('debug', 'release')][string]$Configuration = 'debug',
     [ValidatePattern('^[A-Za-z0-9_-]+$')][string]$OutputName,
-    [switch]$EmptyChannels
+    [switch]$EmptyChannels,
+    [switch]$Performance,
+    [switch]$NoRealtime
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
@@ -20,11 +22,23 @@ try {
 $logs = Join-Path $root '.build/windows'
 $fixtureArguments = @("`"$PSScriptRoot/mock-server.py`"", '--channel-tree', '--legacy-images', '--split-image-responses')
 $appArguments = @('--smoke-test')
+if ($Performance) {
+    $appArguments += '--smoke-performance'
+    $fixtureArguments += '--fragment-websockets'
+}
+if ($NoRealtime) {
+    if (-not $Performance) { throw 'NoRealtime is only supported with Performance.' }
+    $appArguments += '--smoke-no-realtime'
+}
 $scenarioSuffix = ''
 if ($EmptyChannels) {
     $fixtureArguments += '--empty-channels'
     $appArguments += '--smoke-empty'
     $scenarioSuffix = '-empty'
+}
+if ($Performance) {
+    if ($EmptyChannels) { throw 'Performance and EmptyChannels are separate scenarios.' }
+    $scenarioSuffix = if ($NoRealtime) { '-performance-no-realtime' } else { '-performance' }
 }
 $appLog = "$logs/smoke$scenarioSuffix.log"
 $appErrorLog = "$logs/smoke$scenarioSuffix-errors.log"
@@ -46,6 +60,14 @@ try {
     if ($app.ExitCode -ne 0) {
         Get-Content $appErrorLog
         throw "Windows smoke test failed ($($app.ExitCode))."
+    }
+    if ($Performance) {
+        if (-not $NoRealtime) {
+            $state = Invoke-RestMethod 'http://127.0.0.1:8765/test/state' -Headers @{'X-Access-Token'='test-token'}
+            if (@($state.records | Where-Object type -eq 'websocket_open').Count -lt 2) { throw 'Reconnect was not exercised.' }
+            if (-not @($state.records | Where-Object type -eq 'fragmented_websocket_message').Count) { throw 'Fragmented WebSocket messages were not exercised.' }
+        }
+        return
     }
     $state = Invoke-RestMethod 'http://127.0.0.1:8765/test/state' -Headers @{'X-Access-Token'='test-token'}
     $requests = @($state.image_requests)

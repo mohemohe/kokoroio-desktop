@@ -23,4 +23,7 @@ uint32_t KokoroGetMinimumClientSize(int32_t *width, int32_t *height);
 // Opens the Windows emoji panel only while this process owns foreground focus.
 uint32_t KokoroShowEmojiPanel(void);
 int32_t KokoroPumpMessages(void);
-void KokoroWaitForMessages(void);
+void KokoroWaitForMessages(uint32_t timeoutMilliseconds);
+uint64_t KokoroMessagePumpCount(void);
+double KokoroProcessCPUSeconds(void);
+double KokoroThreadCPUSeconds(void);
