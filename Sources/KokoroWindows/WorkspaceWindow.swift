@@ -338,7 +338,7 @@ final class WorkspaceWindow {
             var elements: [FrameworkElement] = []
             var separators: [Int: (date: Date, element: FrameworkElement)] = [:]
             for (index, message) in messages.enumerated() {
-                let startsDay = index == 0 || !Calendar.current.isDate(messages[index - 1].publishedAt, inSameDayAs: message.publishedAt)
+                let startsDay = index == 0 || !WindowsTimelineDate(messages[index - 1].publishedAt).isSameDay(as: WindowsTimelineDate(message.publishedAt))
                 let grouped = index > 0 && !startsDay && !message.isDeleted && !messages[index - 1].isDeleted && messages[index - 1].profile.id == message.profile.id && message.publishedAt.timeIntervalSince(messages[index - 1].publishedAt) < 300
                 if startsDay {
                     let existing = daySeparators[message.id]
@@ -418,8 +418,7 @@ final class WorkspaceWindow {
     private func daySeparator(_ date: Date) -> FrameworkElement {
         let grid = Grid(); columns(grid, [nil, -1, nil]); grid.columnSpacing = 12; grid.margin = .init(left: 26, top: 12, right: 26, bottom: 12)
         let left = line(); left.verticalAlignment = .center; grid.children.append(left)
-        let formatter = DateFormatter(); formatter.locale = Locale(identifier: "ja_JP"); formatter.dateFormat = "yyyy年M月d日(E)"
-        let label = text(formatter.string(from: date), size: 10); label.opacity = 0.65
+        let label = text(WindowsTimelineDate(date).dayText, size: 10); label.opacity = 0.65
         let capsule = Border(); capsule.cornerRadius = corners(16); capsule.borderThickness = inset(1); capsule.borderBrush = SolidColorBrush(.init(a: 25, r: 128, g: 128, b: 128)); capsule.padding = .init(left: 10, top: 5, right: 10, bottom: 5); capsule.child = label
         try? Grid.setColumn(capsule, 1); grid.children.append(capsule)
         let right = line(); right.verticalAlignment = .center; try? Grid.setColumn(right, 2); grid.children.append(right); return grid

@@ -1,5 +1,6 @@
 import Foundation
 import KokoroCore
+import KokoroWindowsState
 import UWP
 import WinUI
 import WindowsFoundation
@@ -59,7 +60,7 @@ final class TimelineMessageView {
         root.children.append(body)
         retainedElements.append(body)
 
-        let timestamp = label(message.publishedAt.formatted(.dateTime.hour().minute()), size: isGrouped ? 10 : 11)
+        let timestamp = label(WindowsTimelineDate(message.publishedAt).timeText, size: isGrouped ? 10 : 11)
         timestamp.opacity = isGrouped ? 0 : 0.65
         if isGrouped {
             timestamp.fontFamily = FontFamily("Consolas")
