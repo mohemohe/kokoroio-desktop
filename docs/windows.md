@@ -4,6 +4,7 @@ Windows 版は Swift と WinUI 3 のネイティブアプリです。
 アプリアイコンは macOS 版と共通の `Resources/KokoroDesktop.iconset` を使用します。
 `build-windows.ps1` が 16 / 32 / 64 / 128 / 256 px の画像から ICO を生成し、Windows SDK の
 リソースコンパイラーで EXE に埋め込むため、エクスプローラーやショートカットにも同じアイコンが表示されます。
+メイン画面・設定画面も EXE 内のアイコンを `AppWindow.SetIcon` で設定するため、タイトルバーに同じアイコンが表示されます。
 メイン画面・設定画面のタイトルバーは Windows の「個人用設定 → 色 → 既定のアプリ モード」のライト／ダークに追従します。
 Windows App SDK 1.7 の `AppWindowTitleBar.PreferredTheme = UseDefaultAppMode` を使い、色の選択と設定変更への追従は OS に任せています。
 [thebrowsercompany/swift-winrt](https://github.com/thebrowsercompany/swift-winrt) で

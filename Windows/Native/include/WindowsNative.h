@@ -3,6 +3,8 @@
 #include <stddef.h>
 int32_t KokoroInitializeRuntime(void);
 void KokoroShutdownRuntime(void);
+// AppWindow IconId for the shared icon embedded in the executable (HRESULT).
+int32_t KokoroGetApplicationIconId(uint64_t *iconId);
 // UTF-8 JSON stays in the current user's Windows Credential Manager.
 uint32_t KokoroSaveCredential(const uint8_t *bytes, uint32_t count);
 uint32_t KokoroLoadCredential(uint8_t *bytes, uint32_t capacity, uint32_t *count);

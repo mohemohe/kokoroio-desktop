@@ -37,7 +37,7 @@ final class WindowsSettingsWindow {
         self.notificationService = notificationService
         primaryControls = [notifications, sound, target, key]
         window.title = "設定"
-        WindowsTitleBar.followSystemTheme(for: window)
+        WindowsTitleBar.configure(for: window)
 
         let form = StackPanel()
         form.spacing = 12

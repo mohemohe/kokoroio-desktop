@@ -22,6 +22,32 @@ typedef struct KokoroMinimumWindowSize {
 
 static const UINT_PTR minimumSizeSubclassID = 0x4B6F6B6F;
 
+int32_t KokoroGetApplicationIconId(uint64_t *iconId) {
+    if (!iconId) return E_POINTER;
+    *iconId = 0;
+    // Resource 1 is the same icon group used by Explorer and shortcuts.
+    // LoadIcon returns a shared handle that remains valid for the process lifetime.
+    HICON icon = LoadIconW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(1));
+    if (!icon) return HRESULT_FROM_WIN32(GetLastError());
+
+    // Follow Microsoft.UI.Interop.h's GetIconIdFromIcon implementation. The
+    // Windows App Runtime must be initialized before resolving this interop API.
+    static HMODULE interop;
+    if (!interop) {
+        interop = GetModuleHandleW(L"Microsoft.Internal.FrameworkUdk.dll");
+        if (!interop) interop = LoadLibraryW(L"Microsoft.Internal.FrameworkUdk.dll");
+    }
+    if (!interop) return HRESULT_FROM_WIN32(GetLastError());
+    typedef struct { uint64_t value; } NativeIconId;
+    typedef HRESULT (WINAPI *GetIconIdFn)(HICON, NativeIconId *);
+    GetIconIdFn getIconId = (GetIconIdFn)GetProcAddress(interop, "Windowing_GetIconIdFromIcon");
+    if (!getIconId) return HRESULT_FROM_WIN32(GetLastError());
+    NativeIconId result = {0};
+    HRESULT hr = getIconId(icon, &result);
+    if (SUCCEEDED(hr)) *iconId = result.value;
+    return hr;
+}
+
 static HWND ownedActiveWindow(void) {
     HWND window = GetActiveWindow();
     DWORD process = 0;

@@ -70,7 +70,7 @@ final class WorkspaceWindow {
 
     func show() throws {
         window.title = "kokoro.io"
-        WindowsTitleBar.followSystemTheme(for: window)
+        WindowsTitleBar.configure(for: window)
         window.closed.addHandler { [weak self] _, _ in self?.isClosed = true; self?.settings?.close() }
         window.activated.addHandler { [weak self] _, args in
             guard let self else { return }; store.isActive = args?.windowActivationState != .deactivated
