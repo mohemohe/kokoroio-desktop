@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationXML)
+import FoundationXML
+#endif
 
 public struct HotwireMessageEmbeds: Equatable, Sendable {
     /// Content-only replacements have no channel identity; callers must correlate them with a known message.
@@ -67,9 +70,7 @@ public enum HotwireEmbedParser {
                   inner.hasPrefix("<template>"), inner.hasSuffix("</template>") else { continue }
             let content = String(inner.dropFirst("<template>".count).dropLast("</template>".count))
             guard let fragment = prepare(content),
-                  let document = try? XMLDocument(xmlString: fragment.html,
-                                                  options: [.documentTidyHTML, .nodeLoadExternalEntitiesNever]),
-                  let body = document.rootElement()?.embedElementChildren.first(where: { $0.name == "body" }) else { continue }
+                  let body = HotwireHTMLParser.body(fragment.html) else { continue }
 
             if ["replace", "update"].contains(action),
                let messageID = messageID(from: target, suffix: "_content") {

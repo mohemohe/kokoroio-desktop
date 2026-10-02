@@ -2,9 +2,6 @@ import Foundation
 #if canImport(FoundationXML)
 import FoundationXML
 #endif
-#if os(Windows)
-import SwiftSoup
-#endif
 
 public struct HotwireMessageImages: Equatable, Sendable {
     public let channelID: String
@@ -54,7 +51,7 @@ public enum HotwireImageParser {
                   let target = stream.attribute(forName: "target")?.stringValue,
                   inner.hasPrefix("<template>"), inner.hasSuffix("</template>") else { continue }
             let content = String(inner.dropFirst("<template>".count).dropLast("</template>".count))
-            guard let body = htmlBody(content) else { continue }
+            guard let body = HotwireHTMLParser.body(content) else { continue }
             for root in body.elementChildren where root.name == "div" && root.hasClass("talk") {
                 guard let identifier = root.attribute(forName: "id")?.stringValue,
                       identifier.hasPrefix("message_"),
@@ -71,41 +68,6 @@ public enum HotwireImageParser {
             }
         }
         return records
-    }
-
-    private static func htmlBody(_ content: String) -> XMLElement? {
-        #if os(Windows)
-        // corelibs FoundationXML ignores documentTidyHTML. Parse without loading any
-        // resources, then copy just the element/attribute data used by the rules below.
-        guard let body = try? SwiftSoup.parseBodyFragment(content).body() else { return nil }
-        func convert(_ element: SwiftSoup.Element, depth: Int) -> XMLElement? {
-            guard depth < 256 else { return nil }
-            let node = XMLElement(name: element.tagName())
-            for name in ["id", "class", "data-channel-hashid", "href", "src"] {
-                guard element.hasAttr(name), var value = try? element.attr(name) else { continue }
-                if name == "href" || name == "src" {
-                    // Match HTML tidy's URI attribute whitespace normalization.
-                    value = value.replacingOccurrences(of: "\r\n", with: " ")
-                        .replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
-                        .replacingOccurrences(of: "\t", with: " ")
-                        .trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: " ", with: "%20")
-                }
-                if let attribute = XMLNode.attribute(withName: name, stringValue: value) as? XMLNode {
-                    node.addAttribute(attribute)
-                }
-            }
-            for child in element.children().array() {
-                guard let converted = convert(child, depth: depth + 1) else { return nil }
-                node.addChild(converted)
-            }
-            return node
-        }
-        return convert(body, depth: 0)
-        #else
-        guard let document = try? XMLDocument(xmlString: content,
-                                              options: [.documentTidyHTML, .nodeLoadExternalEntitiesNever]) else { return nil }
-        return document.rootElement()?.elementChildren.first(where: { $0.name == "body" })
-        #endif
     }
 
     private static func images(in root: XMLElement, identifier: String, baseURL: URL) -> [EmbedImagePreview] {
