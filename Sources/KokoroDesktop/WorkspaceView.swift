@@ -39,7 +39,7 @@ struct WorkspaceView: View {
                     .font(.system(size: 12))
                 TextField("チャンネルを検索", text: $store.channelSearch)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 12))
+                    .scaledFont(size: 12)
                     .foregroundStyle(.primary)
                     .accessibilityLabel("チャンネルを検索")
                 if !store.channelSearch.isEmpty {
@@ -62,7 +62,7 @@ struct WorkspaceView: View {
                     Image(systemName: "tray")
                         .font(.system(size: 14))
                     Text("未読メッセージ")
-                        .font(.system(size: 12, weight: .medium))
+                        .scaledFont(size: 12, weight: .medium)
                     Spacer()
                     if let unreadBadgeLabel = store.totalUnreadBadgeLabel {
                         unreadBadge(unreadBadgeLabel)
@@ -98,9 +98,9 @@ struct WorkspaceView: View {
                     if store.filteredChannels.isEmpty {
                         VStack(alignment: .leading, spacing: 6) {
                             Text(store.unreadOnly ? "未読はありません" : "チャンネルが見つかりません")
-                                .font(.system(size: 12, weight: .medium))
+                                .scaledFont(size: 12, weight: .medium)
                             Text(store.unreadOnly ? "すべての会話を確認しました。" : "検索条件を変更してください。")
-                                .font(.system(size: 11))
+                                .scaledFont(size: 11)
                                 .foregroundStyle(.secondary)
                         }
                         .listRowSeparator(.hidden)
@@ -156,7 +156,7 @@ struct WorkspaceView: View {
 
     private func unreadBadge(_ label: String) -> some View {
         Text(label)
-            .font(.system(size: 10, weight: .bold, design: .rounded))
+            .scaledFont(size: 10, weight: .bold, design: .rounded)
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
             .background(.quaternary, in: Capsule())
@@ -169,7 +169,7 @@ struct WorkspaceView: View {
                     .fill(store.isConnected ? Color.green : Color.orange)
                     .frame(width: 6, height: 6)
                 Text(store.connectionLabel)
-                    .font(.system(size: 10))
+                    .scaledFont(size: 10)
                     .foregroundStyle(.secondary)
                 Spacer()
             }
@@ -178,11 +178,11 @@ struct WorkspaceView: View {
                     ChatAvatar(profile: profile, size: 33)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(profile.displayName)
-                            .font(.system(size: 12, weight: .semibold))
+                            .scaledFont(size: 12, weight: .semibold)
                             .foregroundStyle(.primary)
                             .lineLimit(1)
                         Text("@\(profile.screenName)")
-                            .font(.system(size: 10))
+                            .scaledFont(size: 10)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
@@ -216,10 +216,13 @@ struct WorkspaceView: View {
                 if let error = store.errorMessage { errorBanner(error) }
                 ContentUnavailableView {
                     Label("会話をはじめましょう", systemImage: "bubble.left.and.bubble.right")
+                        .scaledFont(.title2, weight: .bold)
                 } description: {
                     Text("サイドバーからチャンネルを選択してください。")
+                        .scaledFont(.body)
                 } actions: {
                     Button("チャンネルを再読み込み") { store.refresh() }
+                        .scaledFont(.body)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -233,16 +236,16 @@ struct WorkspaceView: View {
                 .foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 4) {
                 Text(channel.name)
-                    .font(.system(size: 16, weight: .bold))
+                    .scaledFont(size: 16, weight: .bold)
                     .lineLimit(1)
                 if !channel.description.isEmpty {
                     Text(channel.description)
-                        .font(.system(size: 11))
+                        .scaledFont(size: 11)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 } else {
                     Text(channel.isDirectMessage ? "ダイレクトメッセージ" : isPrivate(channel) ? "プライベートチャンネル" : "パブリックチャンネル")
-                        .font(.system(size: 11))
+                        .scaledFont(size: 11)
                         .foregroundStyle(.secondary)
                 }
             }
@@ -297,7 +300,7 @@ struct WorkspaceView: View {
                 .disabled(store.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).count < 2)
                 .help("2文字以上入力してください。")
         }
-        .font(.system(size: 12))
+        .scaledFont(size: 12)
         .padding(.horizontal, 10)
         .frame(minWidth: 150, idealWidth: 280, maxWidth: 360, minHeight: 30)
         .background(.quaternary, in: RoundedRectangle(cornerRadius: 7))
@@ -317,7 +320,7 @@ struct WorkspaceView: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("エラーを閉じる")
         }
-        .font(.system(size: 11))
+        .scaledFont(size: 11)
         .padding(.horizontal, 24)
         .padding(.vertical, 10)
         .background(Color.orange.opacity(0.08))
@@ -353,32 +356,41 @@ private struct ChatTimelineView: View {
                     LazyVStack(spacing: 0) {
                         if store.isShowingSearchResults && store.isSearching {
                             ProgressView("検索中…")
-                                .font(.system(size: 12))
+                                .scaledFont(size: 12)
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 80)
                         } else if store.isShowingSearchResults, let error = store.searchError {
                             ContentUnavailableView {
                                 Label("検索できませんでした", systemImage: "exclamationmark.magnifyingglass")
+                                    .scaledFont(.title2, weight: .bold)
                             } description: {
                                 Text(error)
+                                    .scaledFont(.body)
                             } actions: {
                                 Button("再試行") { store.searchSelectedChannel() }
+                                    .scaledFont(.body)
                             }
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 60)
                         } else if store.isShowingSearchResults && displayedMessages.isEmpty {
-                            ContentUnavailableView.search
+                            ContentUnavailableView {
+                                Label("検索結果がありません", systemImage: "magnifyingglass")
+                                    .scaledFont(.title2, weight: .bold)
+                            } description: {
+                                Text("検索条件を変更してください。")
+                                    .scaledFont(.body)
+                            }
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 60)
                         } else if !store.isShowingSearchResults && store.isLoadingMessages && store.messages.isEmpty {
                             ProgressView("メッセージを読み込み中…")
-                                .font(.system(size: 12))
+                                .scaledFont(size: 12)
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 80)
                         } else {
                             if store.isShowingSearchResults {
                                 Text("検索結果: \(displayedMessages.count) 件")
-                                    .font(.system(size: 11))
+                                    .scaledFont(size: 11)
                                     .foregroundStyle(.secondary)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     .padding(.horizontal, 26)
@@ -446,7 +458,7 @@ private struct ChatTimelineView: View {
                             scrollToLatest(proxy, animated: true)
                         } label: {
                             Label("最新のメッセージ", systemImage: "arrow.down")
-                                .font(.system(size: 11, weight: .medium))
+                                .scaledFont(size: 11, weight: .medium)
                                 .padding(.horizontal, 13)
                                 .padding(.vertical, 8)
                                 .background(.regularMaterial, in: Capsule())
@@ -476,7 +488,7 @@ private struct ChatTimelineView: View {
                     }
                     Text(store.isLoadingMore ? "読み込み中…" : "以前のメッセージを読み込む")
                 }
-                .font(.system(size: 11))
+                .scaledFont(size: 11)
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 14)
@@ -491,13 +503,13 @@ private struct ChatTimelineView: View {
                     .frame(width: 52, height: 52)
                     .background(KChatPalette.accent.opacity(0.09), in: RoundedRectangle(cornerRadius: 14))
                 Text(channel.name)
-                    .font(.system(size: 23, weight: .bold))
+                    .scaledFont(size: 23, weight: .bold)
                 Text(store.messages.isEmpty ? "最初のメッセージを送って、会話をはじめましょう。" : "このチャンネルの会話はここから始まります。")
-                    .font(.system(size: 12))
+                    .scaledFont(size: 12)
                     .foregroundStyle(.secondary)
                 if !channel.description.isEmpty {
                     Text(channel.description)
-                        .font(.system(size: 12))
+                        .scaledFont(size: 12)
                         .foregroundStyle(.secondary)
                         .textSelection(.enabled)
                 }
@@ -513,7 +525,7 @@ private struct ChatTimelineView: View {
         HStack(spacing: 12) {
             Rectangle().fill(Color.primary.opacity(0.08)).frame(height: 1)
             Text(date, format: .dateTime.year().month().day().weekday())
-                .font(.system(size: 10, weight: .medium))
+                .scaledFont(size: 10, weight: .medium)
                 .foregroundStyle(.secondary)
                 .fixedSize()
                 .padding(.horizontal, 10)

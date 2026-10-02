@@ -7,42 +7,44 @@ struct MessageRow: View {
     let message: Message
     var isGrouped = false
 
+    @Environment(\.appFontScale) private var fontScale
     @State private var isHovered = false
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             if isGrouped {
                 Text(message.publishedAt, format: .dateTime.hour().minute())
-                    .font(.system(size: 10, design: .monospaced))
+                    .scaledFont(size: 10, design: .monospaced)
                     .foregroundStyle(.tertiary)
-                    .frame(width: 38, alignment: .trailing)
+                    .frame(width: max(38, 38 * fontScale), alignment: .trailing)
                     .opacity(isHovered ? 1 : 0)
                     .padding(.top, 3)
                     .accessibilityHidden(true)
             } else {
                 ChatAvatar(profile: message.profile, size: 38, avatarURL: message.avatar)
+                    .frame(width: max(38, 38 * fontScale), alignment: .trailing)
             }
 
             VStack(alignment: .leading, spacing: 4) {
                 if !isGrouped {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Text(message.displayName)
-                            .font(.system(size: 13, weight: .semibold))
+                            .scaledFont(size: 13, weight: .semibold)
                             .foregroundStyle(.primary)
                         Text(message.publishedAt, format: .dateTime.hour().minute())
-                            .font(.system(size: 11))
+                            .scaledFont(size: 11)
                             .foregroundStyle(.secondary)
                     }
                 }
                 if message.isDeleted {
                     Text("このメッセージは削除されました")
-                        .font(.system(size: 13))
+                        .scaledFont(size: 13)
                         .italic()
                         .foregroundStyle(.secondary)
                 } else {
                     StructuredText(markdownSource, parser: ChatMarkdownParser())
-                        .font(.system(size: 13))
-                        .lineSpacing(4)
+                        .scaledFont(size: 13)
+                        .lineSpacing(4 * fontScale)
                         .textual.textSelection(.enabled)
                         .textual.inlineStyle(InlineStyle.default.link(.foregroundColor(KChatPalette.accent)))
                         .textual.tableStyle(.overflow)
@@ -111,38 +113,52 @@ struct ChatAvatar: View {
 
 #if DEBUG
 #Preview("Markdown message", traits: .fixedLayout(width: 640, height: 760)) {
-    ScrollView {
-        MessageRow(message: Message(
-            id: 1,
-            rawContent: """
-            # Markdown の表示
+    MarkdownMessagePreview()
+}
 
-            **太字**、*斜体*、~~取り消し線~~、[kokoro.io](https://kokoro.io)
-            この行は単一改行で表示します。
-            <#CHANNEL|開発 *チャンネル*> と <@USER|山田さん> への参照です。
+#Preview("Markdown message · 50%", traits: .fixedLayout(width: 640, height: 760)) {
+    MarkdownMessagePreview().environment(\.appFontScale, 0.5)
+}
 
-            - 最初の項目
-            - 二番目の項目
-              - 入れ子の項目
+#Preview("Markdown message · 200%", traits: .fixedLayout(width: 640, height: 760)) {
+    MarkdownMessagePreview().environment(\.appFontScale, 2)
+}
 
-            > 引用文です。
-            > 複数行の引用も表示します。
+private struct MarkdownMessagePreview: View {
+    var body: some View {
+        ScrollView {
+            MessageRow(message: Message(
+                id: 1,
+                rawContent: """
+                # Markdown の表示
 
-            ```swift
-            let message = "こんにちは、Markdown!"
-            print(message)
-            ```
+                **太字**、*斜体*、~~取り消し線~~、[kokoro.io](https://kokoro.io)
+                この行は単一改行で表示します。
+                <#CHANNEL|開発 *チャンネル*> と <@USER|山田さん> への参照です。
 
-            | 機能 | 状態 |
-            | --- | --- |
-            | 見出し・リスト | 表示できます |
-            | コード・表 | 表示できます |
-            """,
-            channel: Channel(id: "CHANNEL", channelName: "開発"),
-            profile: Profile(id: "USER", screenName: "yamada", displayName: "山田 太郎")
-        ))
-        .padding(.vertical, 12)
+                - 最初の項目
+                - 二番目の項目
+                  - 入れ子の項目
+
+                > 引用文です。
+                > 複数行の引用も表示します。
+
+                ```swift
+                let message = "こんにちは、Markdown!"
+                print(message)
+                ```
+
+                | 機能 | 状態 |
+                | --- | --- |
+                | 見出し・リスト | 表示できます |
+                | コード・表 | 表示できます |
+                """,
+                channel: Channel(id: "CHANNEL", channelName: "開発"),
+                profile: Profile(id: "USER", screenName: "yamada", displayName: "山田 太郎")
+            ))
+            .padding(.vertical, 12)
+        }
+        .background(Color(nsColor: .textBackgroundColor))
     }
-    .background(Color(nsColor: .textBackgroundColor))
 }
 #endif

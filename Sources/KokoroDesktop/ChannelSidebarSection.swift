@@ -44,7 +44,7 @@ struct ChannelSidebarSection: View {
                 Section {
                     if channels.isEmpty, let emptyMessage {
                         Text(emptyMessage)
-                            .font(.system(size: 11))
+                            .scaledFont(size: 11)
                             .foregroundStyle(.secondary)
                     }
                     ChannelTreeRows(
@@ -59,6 +59,7 @@ struct ChannelSidebarSection: View {
                         Spacer()
                         Text("\(channels.count)")
                     }
+                    .scaledFont(.caption1)
                 }
             }
         }
@@ -106,7 +107,7 @@ private struct ChannelTreeRows: View {
                     HStack {
                         // Keep empty path components visually blank, including a leading slash.
                         Text(node.name)
-                            .font(.system(size: 12, weight: unread > 0 ? .semibold : .regular))
+                            .scaledFont(size: 12, weight: unread > 0 ? .semibold : .regular)
                             .lineLimit(1)
                         Spacer(minLength: 4)
                         if unread > 0 { ChannelUnreadBadge(count: unread) }
@@ -159,7 +160,7 @@ private struct ChannelSidebarRow: View {
                 .font(.system(size: channel.isDirectMessage ? 12 : 13, weight: .medium))
                 .frame(width: 16)
             Text(name)
-                .font(.system(size: 12, weight: channel.unreadCount > 0 ? .semibold : .regular))
+                .scaledFont(size: 12, weight: channel.unreadCount > 0 ? .semibold : .regular)
                 .lineLimit(1)
             Spacer(minLength: 4)
             if channel.unreadCount > 0 { ChannelUnreadBadge(count: channel.unreadCount) }
@@ -195,7 +196,7 @@ private struct ChannelUnreadBadge: View {
 
     var body: some View {
         Text(count > 99 ? "99+" : String(count))
-            .font(.system(size: 10, weight: .bold, design: .rounded))
+            .scaledFont(size: 10, weight: .bold, design: .rounded)
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
             .background(.quaternary, in: Capsule())

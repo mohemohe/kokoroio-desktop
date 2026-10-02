@@ -25,7 +25,7 @@ struct MessageEmbedsView: View {
                         revealsSensitiveContent = true
                     } label: {
                         Label("センシティブなメディアを表示", systemImage: "eye.slash")
-                            .font(.system(size: 12))
+                            .scaledFont(size: 12)
                     }
                     .buttonStyle(.bordered)
                 } else {
@@ -99,16 +99,16 @@ private struct EmbedLinkCard: View {
             }
             VStack(alignment: .leading, spacing: 5) {
                 Text(verbatim: embed.cardTitle)
-                    .font(.system(size: 13, weight: .semibold))
+                    .scaledFont(size: 13, weight: .semibold)
                     .foregroundStyle(.primary)
                 if let description = embed.cardDescription, !description.isEmpty {
                     Text(verbatim: description)
-                        .font(.system(size: 12))
+                        .scaledFont(size: 12)
                         .foregroundStyle(.secondary)
                 }
                 if let host = embed.linkURL?.host, embed.data?.type != "MixedContent" {
                     Text(verbatim: host)
-                        .font(.system(size: 10))
+                        .scaledFont(size: 10)
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
                 }
@@ -141,7 +141,7 @@ private struct EmbedThumbnail: View {
                         Image(systemName: "photo")
                             .font(.system(size: 22))
                         Text("画像を読み込めません")
-                            .font(.system(size: 10))
+                            .scaledFont(size: 10)
                     }
                     .foregroundStyle(.secondary)
                 } else {

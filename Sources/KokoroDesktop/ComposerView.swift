@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 
 struct ComposerView: View {
     @EnvironmentObject private var store: ChatStore
+    @Environment(\.appFontScale) private var fontScale
     @State private var editorHeight: CGFloat = ChatTextEditor.minimumHeight
     @State private var emojiPickerRequest = 0
     @State private var isImagePickerPresented = false
@@ -34,7 +35,7 @@ struct ComposerView: View {
                 ZStack(alignment: .topLeading) {
                     if store.draft.isEmpty {
                         Text("\(store.selectedChannel?.name ?? "チャンネル") にメッセージを送信")
-                            .font(.system(size: 13))
+                            .scaledFont(size: 13)
                             .foregroundStyle(.tertiary)
                             .padding(.leading, 16)
                             .padding(.top, 13)
@@ -56,7 +57,7 @@ struct ComposerView: View {
                             }
                         }
                     )
-                    .frame(height: editorHeight)
+                    .frame(height: max(ChatTextEditor.minimumHeight(for: fontScale), editorHeight))
                     .accessibilityLabel("メッセージ")
                 }
 
@@ -86,7 +87,7 @@ struct ComposerView: View {
                     Spacer()
                     if characterCount > characterLimit - 500 {
                         Text("\(characterCount) / \(characterLimit)")
-                            .font(.system(size: 10, design: .monospaced))
+                            .scaledFont(size: 10, design: .monospaced)
                             .foregroundStyle(characterCount > characterLimit ? Color.red : .secondary)
                     }
                     Button {
@@ -124,7 +125,7 @@ struct ComposerView: View {
                 Spacer()
                 Text("Enterで送信 · Shift + Enterで改行")
             }
-            .font(.system(size: 10))
+            .scaledFont(size: 10)
             .foregroundStyle(.tertiary)
         }
         .padding(.horizontal, 24)
@@ -251,6 +252,10 @@ private struct ChatTextEditor: NSViewRepresentable {
     // One 16-point text line plus the 11-point top and bottom insets.
     static let minimumHeight: CGFloat = 38
 
+    static func minimumHeight(for scale: CGFloat) -> CGFloat { 16 * scale + 22 }
+
+    @Environment(\.appFontScale) private var fontScale
+
     @Binding var text: String
     @Binding var height: CGFloat
     var isEnabled: Bool
@@ -273,7 +278,7 @@ private struct ChatTextEditor: NSViewRepresentable {
         editor.delegate = context.coordinator
         editor.isRichText = false
         editor.drawsBackground = false
-        editor.font = .systemFont(ofSize: 13)
+        editor.font = .systemFont(ofSize: 13 * fontScale)
         editor.textColor = .labelColor
         editor.insertionPointColor = .labelColor
         editor.textContainerInset = NSSize(width: 11, height: 11)
@@ -282,7 +287,7 @@ private struct ChatTextEditor: NSViewRepresentable {
         editor.autoresizingMask = [.width]
         editor.textContainer?.widthTracksTextView = true
         editor.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
-        editor.minSize = NSSize(width: 0, height: Self.minimumHeight)
+        editor.minSize = NSSize(width: 0, height: Self.minimumHeight(for: fontScale))
         editor.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         editor.allowsUndo = true
         editor.isAutomaticQuoteSubstitutionEnabled = false
@@ -300,6 +305,12 @@ private struct ChatTextEditor: NSViewRepresentable {
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let editor = scrollView.documentView as? ComposerTextView else { return }
         context.coordinator.parent = self
+        if editor.font?.pointSize != 13 * fontScale {
+            let selection = editor.selectedRanges
+            editor.font = .systemFont(ofSize: 13 * fontScale)
+            editor.selectedRanges = selection
+        }
+        editor.minSize.height = Self.minimumHeight(for: fontScale)
         editor.onSubmit = onSubmit
         editor.onImageInput = onImageInput
         editor.canAcceptImages = canAcceptImages
@@ -344,7 +355,7 @@ private struct ChatTextEditor: NSViewRepresentable {
         func updateHeight(_ editor: NSTextView) {
             guard let layoutManager = editor.layoutManager, let container = editor.textContainer else { return }
             layoutManager.ensureLayout(for: container)
-            let newHeight = max(ChatTextEditor.minimumHeight, min(170, layoutManager.usedRect(for: container).height + 22))
+            let newHeight = max(ChatTextEditor.minimumHeight(for: parent.fontScale), min(170, layoutManager.usedRect(for: container).height + 22))
             guard abs(parent.height - newHeight) > 1 else { return }
             DispatchQueue.main.async { [weak self] in self?.parent.height = newHeight }
         }
