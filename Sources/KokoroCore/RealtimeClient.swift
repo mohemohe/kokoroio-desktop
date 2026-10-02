@@ -107,7 +107,7 @@ public enum ActionCableProtocol {
         try actionFrame(["action": "unsubscribe"])
     }
 
-    /// Reuses the Web client's catch-up action to obtain rendered attachment URLs.
+    /// Reuses the Web client's catch-up action to obtain server-rendered embed metadata.
     public static func resumeFrame(channelID: String, afterID: Int) throws -> String {
         guard !channelID.isEmpty,
               channelID.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) })

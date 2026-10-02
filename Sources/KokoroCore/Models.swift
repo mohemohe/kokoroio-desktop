@@ -193,6 +193,10 @@ public struct EmbedContent: Codable, Hashable, Sendable {
         data?.restrictionPolicy == "Restricted" || data?.metadataImage?.restrictionPolicy == "Restricted" || data?.nsfw == true
     }
     public var hasUnavailableImage: Bool { isUploadedImage && imagePreviews.isEmpty }
+    public var needsWebLinkMetadata: Bool {
+        guard let data, data.type == "MixedContent", data.available != false, linkURL != nil else { return false }
+        return cardDescription == nil || (cardThumbnailURL != nil && data.metadataImageIsAuthor == nil && data.providerName == nil)
+    }
     public var linkURL: URL? { safeEmbedURL(data?.url) ?? safeEmbedURL(url) }
 
     public var imagePreviews: [EmbedImagePreview] {
@@ -236,6 +240,10 @@ public struct EmbedContent: Codable, Hashable, Sendable {
         return data?.metadataImage?.previewURL ?? safeEmbedURL(data?.thumbnailURL) ?? imagePreviews.first?.thumbnailURL
     }
 
+    public var cardThumbnailIsAuthor: Bool {
+        data?.metadataImageIsAuthor == true || ["Twitter", "misskey.io"].contains(data?.providerName ?? "")
+    }
+
     enum CodingKeys: String, CodingKey { case url, position, data }
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -265,6 +273,7 @@ public struct EmbedData: Codable, Hashable, Sendable {
     public var thumbnailURL: URL?
     public var medias: [EmbedMedia]
     public var metadataImage: EmbedMedia?
+    public var metadataImageIsAuthor: Bool?
     public var restrictionPolicy: String?
     public var providerName: String?
     public var authorName: String?
@@ -279,9 +288,11 @@ public struct EmbedData: Codable, Hashable, Sendable {
                 thumbnailURL: URL? = nil, medias: [EmbedMedia] = [], metadataImage: EmbedMedia? = nil,
                 restrictionPolicy: String? = nil, providerName: String? = nil, authorName: String? = nil,
                 available: Bool? = nil, displayName: String? = nil, htmlContent: String? = nil,
-                channel: EmbedChannel? = nil, images: [EmbedImage] = [], nsfw: Bool? = nil) {
+                channel: EmbedChannel? = nil, images: [EmbedImage] = [], nsfw: Bool? = nil,
+                metadataImageIsAuthor: Bool? = nil) {
         self.type = type; self.title = title; self.description = description; self.url = url
         self.thumbnailURL = thumbnailURL; self.medias = medias; self.metadataImage = metadataImage
+        self.metadataImageIsAuthor = metadataImageIsAuthor
         self.restrictionPolicy = restrictionPolicy; self.providerName = providerName; self.authorName = authorName
         self.available = available; self.displayName = displayName; self.htmlContent = htmlContent
         self.channel = channel; self.images = images; self.nsfw = nsfw
@@ -291,6 +302,7 @@ public struct EmbedData: Codable, Hashable, Sendable {
         case type, title, description, url, medias, available, channel, images, nsfw
         case thumbnailURL = "thumbnail_url", metadataImage = "metadata_image", restrictionPolicy = "restriction_policy"
         case providerName = "provider_name", authorName = "author_name", displayName = "display_name", htmlContent = "html_content"
+        case metadataImageIsAuthor = "metadata_image_is_author"
     }
 
     public init(from decoder: Decoder) throws {
@@ -303,7 +315,8 @@ public struct EmbedData: Codable, Hashable, Sendable {
                   providerName: values.embedValue(String.self, forKey: .providerName), authorName: values.embedValue(String.self, forKey: .authorName),
                   available: values.embedValue(Bool.self, forKey: .available), displayName: values.embedValue(String.self, forKey: .displayName),
                   htmlContent: values.embedValue(String.self, forKey: .htmlContent), channel: values.embedValue(EmbedChannel.self, forKey: .channel),
-                  images: values.embedArray(EmbedImage.self, forKey: .images), nsfw: values.embedValue(Bool.self, forKey: .nsfw))
+                  images: values.embedArray(EmbedImage.self, forKey: .images), nsfw: values.embedValue(Bool.self, forKey: .nsfw),
+                  metadataImageIsAuthor: values.embedValue(Bool.self, forKey: .metadataImageIsAuthor))
     }
 }
 

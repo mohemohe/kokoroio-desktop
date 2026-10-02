@@ -139,13 +139,14 @@ final class MessageEmbedTests: XCTestCase {
 
     func testEmbedDataSurvivesCodableRoundTrip() throws {
         let message = try decodeMessage(messageJSON(embeds: [["url": "https://example.test/article", "data": [
-            "type": "MixedContent", "title": "Article", "description": "Summary", "restriction_policy": "Restricted",
+            "type": "MixedContent", "title": "Article", "description": "Summary", "restriction_policy": "Restricted", "metadata_image_is_author": true,
             "metadata_image": ["type": "Image", "raw_url": "https://images.example.test/og.png"]]]]))
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         let decoded = try APIJSON.decoder().decode(Message.self, from: encoder.encode(message))
         XCTAssertEqual(decoded, message)
         XCTAssertTrue(decoded.embedContents[0].isRestricted)
+        XCTAssertTrue(decoded.embedContents[0].cardThumbnailIsAuthor)
     }
 
     func testPositionsSortStablyAndInternalHTMLBecomesPlainPreviewText() throws {

@@ -74,9 +74,9 @@ final class ChatStore: ObservableObject {
     private var refreshTask: Task<Void, Never>?
     private var searchTask: Task<Void, Never>?
     private var searchRequestID = UUID()
-    private var imageFallback = UploadedImageFallback()
-    private var imageFallbackTask: Task<Void, Never>?
-    private var imageFallbackRequestID: UUID?
+    private var embedFallback = MessageEmbedFallback()
+    private var embedFallbackTask: Task<Void, Never>?
+    private var embedFallbackRequestID: UUID?
 
     init(notifications: NotificationService, defaults: UserDefaults = .standard) {
         self.notifications = notifications
@@ -89,7 +89,7 @@ final class ChatStore: ObservableObject {
             self?.selectChannel(id)
         }
         realtime.onEvent = { [weak self] event in self?.receive(event) }
-        realtime.onHTML = { [weak self] html in self?.receiveImageHTML(html) }
+        realtime.onHTML = { [weak self] html in self?.receiveEmbedHTML(html) }
         realtime.onStateChange = { [weak self] state in self?.setConnectionState(state) }
         activityObserver = NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in
@@ -531,9 +531,9 @@ final class ChatStore: ObservableObject {
                 let updated = try await self.accurateUnreadCounts(memberships, api: api, profileID: self.profile?.id ?? "")
                 guard self.sessionID == session else { return }
                 self.channels = self.normalize(updated)
-                if let pendingChannel = self.imageFallback.pendingChannelID,
+                if let pendingChannel = self.embedFallback.pendingChannelID,
                    !self.channels.contains(where: { $0.id == pendingChannel }) {
-                    self.resetImageFallback()
+                    self.resetEmbedFallback()
                 }
                 self.realtime.updateSubscriptions(channelIDs: self.channels.map(\.id))
                 if let id = self.selectedChannelID, self.channels.contains(where: { $0.id == id }) {
@@ -580,17 +580,17 @@ final class ChatStore: ObservableObject {
     }
 
     private func showCachedMessages(in channelID: String) {
-        messages = (cache[channelID] ?? []).map { imageFallback.applying(to: $0) }
-        resolveMissingImages()
+        messages = (cache[channelID] ?? []).map { embedFallback.applying(to: $0) }
+        resolveMissingEmbeds()
     }
 
-    private func resolveMissingImages() {
-        guard isConnected, imageFallbackTask == nil, let id = selectedChannelID,
-              let request = imageFallback.nextRequest(in: cache[id] ?? []) else { return }
+    private func resolveMissingEmbeds() {
+        guard isConnected, embedFallbackTask == nil, let id = selectedChannelID,
+              let request = embedFallback.nextRequest(in: cache[id] ?? []) else { return }
         let session = sessionID
         let requestID = UUID()
-        imageFallbackRequestID = requestID
-        imageFallbackTask = Task { [weak self] in
+        embedFallbackRequestID = requestID
+        embedFallbackTask = Task { [weak self] in
             guard let self else { return }
             do {
                 try await self.realtime.resumeMessages(channelID: request.channelID, afterID: request.afterID)
@@ -598,29 +598,30 @@ final class ChatStore: ObservableObject {
             } catch {
                 if Task.isCancelled { return }
             }
-            guard self.sessionID == session, self.imageFallbackRequestID == requestID else { return }
-            self.imageFallback.failPendingRequest()
-            self.imageFallbackTask = nil
-            self.imageFallbackRequestID = nil
+            guard self.sessionID == session, self.embedFallbackRequestID == requestID else { return }
+            self.embedFallback.failPendingRequest()
+            self.embedFallbackTask = nil
+            self.embedFallbackRequestID = nil
         }
     }
 
-    private func receiveImageHTML(_ html: String) {
-        guard let channelID = imageFallback.pendingChannelID, let baseURL = credential?.baseURL,
+    private func receiveEmbedHTML(_ html: String) {
+        guard let channelID = embedFallback.pendingChannelID, let baseURL = credential?.baseURL,
               channels.contains(where: { $0.id == channelID }) else { return }
         let records = HotwireImageParser.parse(html, baseURL: baseURL)
-        guard imageFallback.accept(records, currentMessages: cache[channelID] ?? []) else { return }
-        imageFallbackTask?.cancel()
-        imageFallbackTask = nil
-        imageFallbackRequestID = nil
+        let linkRecords = HotwireEmbedParser.parse(html, baseURL: baseURL)
+        guard embedFallback.accept(records, linkRecords: linkRecords, currentMessages: cache[channelID] ?? []) else { return }
+        embedFallbackTask?.cancel()
+        embedFallbackTask = nil
+        embedFallbackRequestID = nil
         if let selectedChannelID { showCachedMessages(in: selectedChannelID) }
     }
 
-    private func resetImageFallback() {
-        imageFallbackTask?.cancel()
-        imageFallbackTask = nil
-        imageFallbackRequestID = nil
-        imageFallback.reset()
+    private func resetEmbedFallback() {
+        embedFallbackTask?.cancel()
+        embedFallbackTask = nil
+        embedFallbackRequestID = nil
+        embedFallback.reset()
     }
 
     /// The server's REST read endpoint does not reset unread_count. Count after its cursor.
@@ -656,7 +657,7 @@ final class ChatStore: ObservableObject {
                 guard let index = channels.firstIndex(where: { $0.id == id }) else { refresh(); return }
                 eventRevision += 1
                 messageRevisions[message.id] = eventRevision
-                imageFallback.invalidate(messageID: message.id)
+                embedFallback.invalidate(messageID: message.id)
                 let known = cache[id]?.contains(where: { $0.id == message.id }) == true
                 cache[id] = TimelineRules.merge(cache[id] ?? [], with: [message])
                 if selectedChannelID == id { showCachedMessages(in: id) }
@@ -689,9 +690,9 @@ final class ChatStore: ObservableObject {
 
     private func setConnectionState(_ state: RealtimeConnectionState) {
         isConnected = false
-        if state != .connected { resetImageFallback() }
+        if state != .connected { resetEmbedFallback() }
         switch state {
-        case .connected: isConnected = true; connectionLabel = "接続済み"; refresh(); resolveMissingImages()
+        case .connected: isConnected = true; connectionLabel = "接続済み"; refresh(); resolveMissingEmbeds()
         case .connecting: connectionLabel = "接続中…"
         case .reconnecting: connectionLabel = "再接続中…"
         case .disconnected: connectionLabel = "オフライン"
@@ -709,7 +710,7 @@ final class ChatStore: ObservableObject {
 
     private func resetSession() {
         closeSearch()
-        resetImageFallback()
+        resetEmbedFallback()
         sessionID = UUID(); selectionID = UUID(); signInAttemptID = UUID(); isSigningIn = false
         realtime.disconnect()
         notifications.resetSession()

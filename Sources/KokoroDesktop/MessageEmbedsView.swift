@@ -93,21 +93,20 @@ private struct EmbedLinkCard: View {
     private var content: some View {
         HStack(alignment: .top, spacing: 12) {
             if let url = embed.cardThumbnailURL {
-                EmbedThumbnail(url: url, width: 120, height: 90)
+                EmbedThumbnail(url: url, width: embed.cardThumbnailIsAuthor ? 48 : 120,
+                               height: embed.cardThumbnailIsAuthor ? 48 : 90)
                     .accessibilityHidden(true)
             }
             VStack(alignment: .leading, spacing: 5) {
                 Text(verbatim: embed.cardTitle)
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.primary)
-                    .lineLimit(2)
                 if let description = embed.cardDescription, !description.isEmpty {
                     Text(verbatim: description)
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
-                        .lineLimit(3)
                 }
-                if let host = embed.linkURL?.host {
+                if let host = embed.linkURL?.host, embed.data?.type != "MixedContent" {
                     Text(verbatim: host)
                         .font(.system(size: 10))
                         .foregroundStyle(.tertiary)
@@ -155,3 +154,31 @@ private struct EmbedThumbnail: View {
         .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.primary.opacity(0.08)))
     }
 }
+
+#if DEBUG
+#Preview("kokoro.io link expansion", traits: .fixedLayout(width: 760, height: 290)) {
+    MessageEmbedsView(message: Message(
+        id: 828076,
+        embedContents: [EmbedContent(
+            url: URL(string: "https://x.com/kiwicopple/status/2106047481851326869"),
+            data: EmbedData(
+                type: "MixedContent", title: "Paul Copplestone - e/postgres (@kiwicopple)",
+                description: """
+                @supabase has acquired @tursodatabase
+
+                i'm been a huge fan of the team and what they've built. we have big plans together. more to share in our keynote in a few hours
+
+                this is the tweet that convinced us they'll fit right in
+
+                https://t.co/fwDsA2WLkd
+                """,
+                metadataImage: EmbedMedia(type: "Image", rawURL: URL(string: "https://pbs.twimg.com/profile_images/1664343166630109202/xcBMGPSE_normal.jpg")),
+                metadataImageIsAuthor: true
+            )
+        )],
+        channel: Channel(id: "9PRV8C6X2", channelName: "general"), profile: Profile(id: "6OE4NHEPR")
+    ))
+    .padding(16)
+    .background(Color(nsColor: .textBackgroundColor))
+}
+#endif
