@@ -9,6 +9,7 @@ enum KChatPalette {
 struct WorkspaceView: View {
     @EnvironmentObject private var store: ChatStore
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.controlActiveState) private var controlActiveState
     @FocusState private var isSearchFocused: Bool
     @State private var selectedSidebarRow: SidebarChannelID?
 
@@ -26,6 +27,9 @@ struct WorkspaceView: View {
                 .ignoresSafeArea(.container, edges: .top)
         }
         .frame(minWidth: 760, minHeight: 560)
+        .onAppear { store.setConversationActive(controlActiveState == .key) }
+        .onChange(of: controlActiveState) { _, state in store.setConversationActive(state == .key) }
+        .onDisappear { store.setConversationActive(false) }
     }
 
     private var sidebar: some View {
@@ -409,9 +413,9 @@ private struct ChatTimelineView: View {
                     if #unavailable(macOS 15), !store.isShowingSearchResults { updateBottomState(bottomFrame, in: viewport) }
                 }
                 .modifier(TimelineScrollTracking(isSearch: store.isShowingSearchResults) { atBottom in
-                    guard !store.isShowingSearchResults else { return }
+                    guard store.selectedChannelID == channel.id, !store.isShowingSearchResults else { return }
                     store.isAtBottom = atBottom
-                    if atBottom { Task { await store.markSelectedChannelRead() } }
+                    if atBottom { Task { await store.markSelectedChannelRead(expectedChannelID: channel.id) } }
                 })
                 .onAppear {
                     if !store.isShowingSearchResults && !store.messages.isEmpty { scrollToLatest(proxy, animated: false) }
@@ -547,6 +551,7 @@ private struct ChatTimelineView: View {
     }
 
     private func updateBottomState(_ bottom: CGRect, in viewport: CGRect) {
+        guard store.selectedChannelID == channel.id else { return }
         // Both rectangles use the window's coordinate space. The scroll content's
         // local coordinates do not include the scroll offset on macOS.
         // The spacer begins exactly after the newest message, so its first edge
@@ -554,7 +559,7 @@ private struct ChatTimelineView: View {
         let atBottom = !bottom.isNull && viewport.height > 0
             && bottom.minY <= viewport.maxY + 2 && bottom.maxY >= viewport.minY
         if store.isAtBottom != atBottom { store.isAtBottom = atBottom }
-        if atBottom { Task { await store.markSelectedChannelRead() } }
+        if atBottom { Task { await store.markSelectedChannelRead(expectedChannelID: channel.id) } }
     }
 }
 

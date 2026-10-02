@@ -13,6 +13,30 @@ public enum TimelineRules {
         return byID.values.sorted { $0.id < $1.id }
     }
 
+    /// Refreshing channel metadata cannot acknowledge messages in this client.
+    /// Keep locally observed unread until the visible channel's read request succeeds.
+    public static func reconcileUnreadState(in channel: Channel, previous: Channel?, cachedMessages: [Message], currentProfileID: String?) -> Channel {
+        var result = channel
+        if let previous = previous?.membership, previous.id == channel.membership?.id {
+            if previous.latestReadMessageID > (channel.membership?.latestReadMessageID ?? 0) {
+                result.membership?.latestReadMessageID = previous.latestReadMessageID
+                result.membership?.unreadCount = cachedMessages.filter {
+                    $0.id > previous.latestReadMessageID && $0.profile.id != currentProfileID
+                }.count
+            }
+            if previous.unreadCount > 0 {
+                let unreadCount = max(previous.unreadCount, result.unreadCount)
+                result.membership?.latestReadMessageID = previous.latestReadMessageID
+                result.membership?.unreadCount = unreadCount
+                return result
+            }
+        }
+        if let latest = channel.latestMessageID, (result.membership?.latestReadMessageID ?? 0) >= latest {
+            result.membership?.unreadCount = 0
+        }
+        return result
+    }
+
     public static func shouldNotify(message: Message, channel: Channel, currentProfileID: String?, isReadingChannel: Bool, target: DesktopNotificationTarget) -> Bool {
         guard message.status == "active", message.profile.id != currentProfileID, !isReadingChannel,
               channel.membership?.muted != true else { return false }

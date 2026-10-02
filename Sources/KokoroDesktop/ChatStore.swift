@@ -69,6 +69,7 @@ final class ChatStore: ObservableObject {
     private var eventRevision = 0
     private var messageRevisions: [Int: Int] = [:]
     private var readTasks: [String: Task<Void, Never>] = [:]
+    private var isConversationActive = false
     private var activityObserver: NSObjectProtocol?
     private var refreshTask: Task<Void, Never>?
     private var searchTask: Task<Void, Never>?
@@ -342,7 +343,7 @@ final class ChatStore: ObservableObject {
         isLoadingMore = false
         let selection = selectionID
         let session = sessionID
-        isLoadingMessages = messages.isEmpty
+        isLoadingMessages = true
         Task { [weak self] in
             guard let self, let api = self.client else { return }
             do {
@@ -469,25 +470,46 @@ final class ChatStore: ObservableObject {
         }
     }
 
-    func markSelectedChannelRead() async {
-        guard NSApp.isActive, isAtBottom, !isShowingSearchResults, let api = client, let channel = selectedChannel,
-              let membership = channel.membership, let latest = messages.last?.id,
-              latest > membership.latestReadMessageID, readTasks[channel.id] == nil else { return }
+    private var isReadingSelectedChannel: Bool {
+        NSApp.isActive && isConversationActive && isAtBottom && !isShowingSearchResults && !isLoadingMessages
+    }
+
+    func setConversationActive(_ active: Bool) {
+        isConversationActive = active
+        if active, let id = selectedChannelID {
+            Task { await markSelectedChannelRead(expectedChannelID: id) }
+        }
+    }
+
+    func markSelectedChannelRead(expectedChannelID: String? = nil) async {
+        guard isReadingSelectedChannel, let api = client, let channel = selectedChannel,
+              expectedChannelID == nil || expectedChannelID == channel.id,
+              let membership = channel.membership, let tail = messages.last, tail.channel.id == channel.id,
+              tail.id >= (channel.latestMessageID ?? 0) else { return }
+        let latest = tail.id
+        guard latest > membership.latestReadMessageID, readTasks[channel.id] == nil else { return }
         let session = sessionID
+        let selection = selectionID
         let task = Task { [weak self] in
+            guard let self, self.sessionID == session else { return }
+            guard self.selectionID == selection, self.isReadingSelectedChannel else {
+                self.readTasks[channel.id] = nil
+                return
+            }
             var succeeded = false
             do {
                 _ = try await api.markRead(membershipID: membership.id, messageID: latest)
-                guard let self, self.sessionID == session else { return }
+                guard self.sessionID == session else { return }
                 if let index = self.channels.firstIndex(where: { $0.id == channel.id }) {
-                    self.channels[index].membership?.latestReadMessageID = latest
-                    self.channels[index].membership?.unreadCount = (self.cache[channel.id] ?? []).filter { $0.id > latest && $0.profile.id != self.profile?.id }.count
+                    let acknowledged = max(self.channels[index].membership?.latestReadMessageID ?? 0, latest)
+                    self.channels[index].membership?.latestReadMessageID = acknowledged
+                    self.channels[index].membership?.unreadCount = (self.cache[channel.id] ?? []).filter { $0.id > acknowledged && $0.profile.id != self.profile?.id }.count
                 }
                 succeeded = true
             } catch {
                 // Reading never discards the timeline. A later activation retries this boundary.
             }
-            guard let self, self.sessionID == session else { return }
+            guard self.sessionID == session else { return }
             self.readTasks[channel.id] = nil
             if succeeded, self.selectedChannelID == channel.id, (self.messages.last?.id ?? 0) > latest {
                 await self.markSelectedChannelRead()
@@ -640,7 +662,7 @@ final class ChatStore: ObservableObject {
                 if selectedChannelID == id { showCachedMessages(in: id) }
                 channels[index].latestMessageID = max(channels[index].latestMessageID ?? 0, message.id)
                 let isNew = event.name == "message_created" && !known && seenEvents.insert(message.id).inserted
-                let isReading = selectedChannelID == id && !isShowingSearchResults && isAtBottom && NSApp.isActive
+                let isReading = selectedChannelID == id && isReadingSelectedChannel
                 if isNew {
                     if message.profile.id != profile?.id && message.id > (channels[index].membership?.latestReadMessageID ?? 0) {
                         channels[index].membership?.unreadCount += 1
@@ -649,7 +671,7 @@ final class ChatStore: ObservableObject {
                         notifications.schedule(messageID: message.id, channelID: id, channelName: channels[index].name, sender: message.displayName, body: message.text)
                     }
                 }
-                if isReading { Task { await markSelectedChannelRead() } }
+                if isReading { Task { await markSelectedChannelRead(expectedChannelID: id) } }
             } catch { errorMessage = "受信したメッセージを読み込めませんでした。再読み込みしてください。" }
         } else if ["channels_updated", "subscribed", "channel_archived", "channel_unarchived", "member_joined", "member_leaved", "authority_updated"].contains(event.name) {
             refresh()
@@ -660,14 +682,8 @@ final class ChatStore: ObservableObject {
 
     private func normalize(_ incoming: [Channel]) -> [Channel] {
         incoming.filter { !$0.archived && $0.membership?.authority != "invited" }.map { channel in
-            var result = channel
-            if let previous = channels.first(where: { $0.id == channel.id })?.membership,
-               previous.latestReadMessageID > (channel.membership?.latestReadMessageID ?? 0) {
-                result.membership?.latestReadMessageID = previous.latestReadMessageID
-                result.membership?.unreadCount = (cache[channel.id] ?? []).filter { $0.id > previous.latestReadMessageID && $0.profile.id != profile?.id }.count
-            }
-            if let latest = channel.latestMessageID, (result.membership?.latestReadMessageID ?? 0) >= latest { result.membership?.unreadCount = 0 }
-            return result
+            TimelineRules.reconcileUnreadState(in: channel, previous: channels.first { $0.id == channel.id },
+                                              cachedMessages: cache[channel.id] ?? [], currentProfileID: profile?.id)
         }
     }
 

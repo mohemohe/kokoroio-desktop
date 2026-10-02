@@ -43,6 +43,74 @@ final class TimelineRulesTests: XCTestCase {
         XCTAssertEqual(merged, [update])
     }
 
+    func testRefreshKeepsUnreadInEveryUnacknowledgedChannelEvenWhenServerCursorAdvances() {
+        let previous = (1...3).map { index -> Channel in
+            var room = unreadChannel(count: index, cursor: 10, latest: 20)
+            room.id = "CHANNEL0\(index)"
+            room.membership?.id = "MEMBER00\(index)"
+            return room
+        }
+        let refreshed = previous.map { room -> Channel in
+            var incoming = room
+            incoming.membership?.unreadCount = 0
+            incoming.membership?.latestReadMessageID = 20
+            return TimelineRules.reconcileUnreadState(in: incoming, previous: room, cachedMessages: [], currentProfileID: currentProfileID)
+        }
+        XCTAssertEqual(refreshed.map(\.unreadCount), [1, 2, 3])
+        XCTAssertEqual(refreshed.map { $0.membership?.latestReadMessageID }, [10, 10, 10])
+        XCTAssertEqual(refreshed.reduce(0) { $0 + $1.unreadCount }, 6)
+    }
+
+    func testRefreshKeepsUnreadArrivingWhileMembershipRequestIsInFlight() {
+        let incoming = unreadChannel(count: 2, cursor: 10, latest: 20)
+        let current = unreadChannel(count: 3, cursor: 10, latest: 21)
+        let merged = TimelineRules.reconcileUnreadState(in: incoming, previous: current, cachedMessages: [message(21)], currentProfileID: currentProfileID)
+        XCTAssertEqual(merged.unreadCount, 3)
+        XCTAssertEqual(merged.membership?.latestReadMessageID, 10)
+    }
+
+    func testRefreshAcceptsAdditionalUnreadWithoutAcknowledgingExistingUnread() {
+        let incoming = unreadChannel(count: 5, cursor: 10, latest: 25)
+        let current = unreadChannel(count: 2, cursor: 10, latest: 20)
+        let merged = TimelineRules.reconcileUnreadState(in: incoming, previous: current, cachedMessages: [], currentProfileID: currentProfileID)
+        XCTAssertEqual(merged.unreadCount, 5)
+    }
+
+    func testRefreshAfterAcknowledgingOneChannelKeepsOtherChannelsUnread() {
+        let acknowledged = unreadChannel(count: 0, cursor: 20, latest: 20)
+        let stale = unreadChannel(count: 3, cursor: 10, latest: 20)
+        let read = TimelineRules.reconcileUnreadState(in: stale, previous: acknowledged, cachedMessages: [message(20)], currentProfileID: currentProfileID)
+        let untouched = TimelineRules.reconcileUnreadState(in: stale, previous: stale, cachedMessages: [], currentProfileID: currentProfileID)
+        XCTAssertEqual(read.unreadCount, 0)
+        XCTAssertEqual(read.membership?.latestReadMessageID, 20)
+        XCTAssertEqual(untouched.unreadCount, 3)
+    }
+
+    func testStaleRefreshAfterAcknowledgementRetainsOnlyNewerMessagesFromOtherPeople() {
+        let current = unreadChannel(count: 1, cursor: 20, latest: 22)
+        let stale = unreadChannel(count: 5, cursor: 10, latest: 22)
+        let merged = TimelineRules.reconcileUnreadState(in: stale, previous: current,
+                                                      cachedMessages: [message(19), message(20), message(21), message(22, profileID: currentProfileID)],
+                                                      currentProfileID: currentProfileID)
+        XCTAssertEqual(merged.unreadCount, 1)
+        XCTAssertEqual(merged.membership?.latestReadMessageID, 20)
+    }
+
+    func testInitialMembershipUsesServerReadBoundary() {
+        let incoming = unreadChannel(count: 5, cursor: 20, latest: 20)
+        let merged = TimelineRules.reconcileUnreadState(in: incoming, previous: nil, cachedMessages: [], currentProfileID: currentProfileID)
+        XCTAssertEqual(merged.unreadCount, 0)
+    }
+
+    func testRejoinedChannelDoesNotReusePreviousMembershipUnread() {
+        let previous = unreadChannel(count: 5, cursor: 10, latest: 20)
+        var incoming = unreadChannel(count: 0, cursor: 20, latest: 20)
+        incoming.membership?.id = "NEWMEMBER"
+        let merged = TimelineRules.reconcileUnreadState(in: incoming, previous: previous, cachedMessages: [], currentProfileID: currentProfileID)
+        XCTAssertEqual(merged.unreadCount, 0)
+        XCTAssertEqual(merged.membership?.latestReadMessageID, 20)
+    }
+
     func testOwnMessagesNeverNotifyIncludingDirectMessagesAndMentions() {
         let direct = channel(policy: "all_messages", direct: true)
         let own = message(50, content: "<@MYPROF001|alice>", profileID: currentProfileID, channel: direct)
@@ -122,6 +190,14 @@ final class TimelineRulesTests: XCTestCase {
 
     private func channel(policy: String = "all_messages", direct: Bool = false, muted: Bool = false) -> Channel {
         Channel(id: "CHANNEL01", channelName: "general", kind: direct ? "direct_message" : "public_channel", membership: MembershipDetails(id: "MEMBER001", notificationPolicy: policy, muted: muted))
+    }
+
+    private func unreadChannel(count: Int, cursor: Int, latest: Int) -> Channel {
+        var room = channel()
+        room.latestMessageID = latest
+        room.membership?.latestReadMessageID = cursor
+        room.membership?.unreadCount = count
+        return room
     }
 
     private func message(_ id: Int, content: String = "Hello", profileID: String = "OTHER0001", channel: Channel? = nil) -> Message {
