@@ -29,31 +29,3 @@ enum WindowsCredentialStore {
         guard result == 0 else { throw Failure(code: result) }
     }
 }
-
-/// Image-host credentials must never overwrite the kokoro.io login credential.
-enum WindowsImgBBKeyStore {
-    static func load() throws -> String? {
-        var bytes = [UInt8](repeating: 0, count: 2560)
-        var count: UInt32 = 0
-        let result = KokoroLoadImgBBKey(&bytes, UInt32(bytes.count), &count)
-        if result == 1168 { return nil } // ERROR_NOT_FOUND
-        guard result == 0 else { throw WindowsCredentialStore.Failure(code: result) }
-        guard let value = String(bytes: bytes.prefix(Int(count)), encoding: .utf8) else {
-            throw WindowsCredentialStore.Failure(code: 13) // ERROR_INVALID_DATA
-        }
-        return value
-    }
-
-    static func save(_ key: String) throws {
-        let value = key.trimmingCharacters(in: .whitespacesAndNewlines)
-        if value.isEmpty { try delete(); return }
-        let bytes = Array(value.utf8)
-        let result = bytes.withUnsafeBufferPointer { KokoroSaveImgBBKey($0.baseAddress, UInt32($0.count)) }
-        guard result == 0 else { throw WindowsCredentialStore.Failure(code: result) }
-    }
-
-    static func delete() throws {
-        let result = KokoroDeleteImgBBKey()
-        guard result == 0 else { throw WindowsCredentialStore.Failure(code: result) }
-    }
-}

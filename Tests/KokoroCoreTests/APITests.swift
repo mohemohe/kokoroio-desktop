@@ -98,6 +98,7 @@ final class APITests: XCTestCase {
             XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
             let body = try Self.readBody(request)
             XCTAssertEqual(body["message"] as? String, "Hello")
+            XCTAssertEqual(body["image_signed_ids"] as? [String], [])
             XCTAssertEqual(body["idempotent_key"] as? String, "d341c706-d340-4c78-8723-19897291723c")
             return (201, Data(Self.message.utf8))
         }
@@ -188,86 +189,111 @@ final class APITests: XCTestCase {
         catch { XCTAssertEqual(error as? APIError, .invalidMessage) }
     }
 
-    func testImgBBUploadUsesMultipartAndReturnsImageAndDeleteURLs() async throws {
+    func testImageUploadUsesServerAuthenticationMultipartFileAndDecodesSignedReference() async throws {
         APIURLProtocol.handler = { request in
             XCTAssertEqual(request.httpMethod, "POST")
-            XCTAssertEqual(request.url?.host, "api.imgbb.com")
-            XCTAssertEqual(request.url?.path, "/1/upload")
-            XCTAssertEqual(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems,
-                           [URLQueryItem(name: "key", value: "secret+key")])
+            XCTAssertEqual(request.url?.host, "chat.example.test")
+            XCTAssertEqual(request.url?.path, "/prefix/api/v1/image_uploads")
+            XCTAssertNil(request.url?.query)
+            XCTAssertEqual(request.value(forHTTPHeaderField: "X-Access-Token"), self.token)
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Accept"), "application/json")
+            let contentType = try XCTUnwrap(request.value(forHTTPHeaderField: "Content-Type"))
+            XCTAssertTrue(contentType.hasPrefix("multipart/form-data; boundary="))
+            let boundary = String(contentType.dropFirst("multipart/form-data; boundary=".count))
             let body = Self.rawBody(request)
-            let text = String(decoding: body, as: UTF8.self)
-            XCTAssertTrue(text.contains("name=\"image\"; filename=\"photo.png\""))
-            XCTAssertTrue(text.contains("Content-Type: image/png"))
-            XCTAssertTrue(text.contains("image bytes"))
-            return (200, Data(#"{"data":{"url":"https://i.ibb.co/img/photo.png","delete_url":"https://ibb.co/img/token"},"success":true,"status":200}"#.utf8))
+            let header = Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"photo.png\"\r\nContent-Type: image/png\r\n\r\n".utf8)
+            let footer = Data("\r\n--\(boundary)--\r\n".utf8)
+            XCTAssertTrue(body.starts(with: header))
+            XCTAssertEqual(body.suffix(footer.count), footer)
+            XCTAssertEqual(body.dropFirst(header.count).dropLast(footer.count), Data([0, 1, 255, 13, 10]))
+            return (201, Data(#"{"signed_id":"server-signed-reference","content_type":"image/webp","animated":false,"animation_format":null}"#.utf8))
         }
-        let upload = try await ImgBBClient(session: session).upload(
-            data: Data("image bytes".utf8), fileName: "photo.png", mimeType: "image/png", apiKey: "secret+key"
-        )
-        XCTAssertEqual(upload.url.absoluteString, "https://i.ibb.co/img/photo.png")
-        XCTAssertEqual(upload.deleteURL.absoluteString, "https://ibb.co/img/token")
+        let upload = try await client.uploadImage(data: Data([0, 1, 255, 13, 10]), fileName: "photo.png", mimeType: "image/png")
+        XCTAssertEqual(upload.signedID, "server-signed-reference")
+        XCTAssertEqual(upload.contentType, "image/webp")
+        XCTAssertFalse(upload.animated)
+        XCTAssertNil(upload.animationFormat)
     }
 
-    func testImgBBDeletePostsParsedURLAndEncodedForm() async throws {
+    func testImageUploadDecodesAnimatedReferenceAndSanitizesMultipartFilename() async throws {
         APIURLProtocol.handler = { request in
-            XCTAssertEqual(request.httpMethod, "POST")
-            XCTAssertEqual(request.url?.absoluteString, "https://ibb.co/json")
-            XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/x-www-form-urlencoded; charset=UTF-8")
-            XCTAssertEqual(request.value(forHTTPHeaderField: "Origin"), "https://ibb.co")
-            XCTAssertEqual(request.value(forHTTPHeaderField: "X-Requested-With"), "XMLHttpRequest")
-            let form = String(decoding: Self.rawBody(request), as: UTF8.self)
-            XCTAssertTrue(form.contains("auth_token=secret%2Bkey"))
-            let fields = URLComponents(string: "?\(form)")!.queryItems!
-            XCTAssertEqual(Dictionary(uniqueKeysWithValues: fields.map { ($0.name, $0.value!) }), [
-                "auth_token": "secret+key", "pathname": "/img/token", "action": "delete",
-                "delete": "image", "from": "resource", "deleting[id]": "img",
-                "deleting[type]": "image", "deleting[privacy]": "public", "deleting[hash]": "token"
-            ])
-            return (200, Data())
+            let body = String(decoding: Self.rawBody(request), as: UTF8.self)
+            XCTAssertTrue(body.contains("filename=\"photo___X-Access-Token_ stolen.gif\""))
+            XCTAssertEqual(body.components(separatedBy: "\r\nX-Access-Token:").count, 1)
+            return (201, Data(#"{"signed_id":"animated-reference","content_type":"image/gif","animated":true,"animation_format":"gif"}"#.utf8))
         }
-        let client = ImgBBClient(session: session)
-        try await client.delete(ImgBBUpload(url: URL(string: "https://i.ibb.co/img/photo.png")!,
-                                             deleteURL: URL(string: "https://ibb.co/img/token")!), apiKey: "secret+key")
+        let upload = try await client.uploadImage(data: Data([1]), fileName: "photo\"\r\nX-Access-Token\u{0} stolen.gif", mimeType: "image/gif")
+        XCTAssertTrue(upload.animated)
+        XCTAssertEqual(upload.animationFormat, "gif")
     }
 
-    func testImgBBDeleteRejectsInvalidURLsAndMissingKeyBeforeRequest() async throws {
+    func testImageUploadAllowsGenericBinaryMIMEForServerFormatDetection() async throws {
+        APIURLProtocol.handler = { request in
+            let body = String(decoding: Self.rawBody(request), as: UTF8.self)
+            XCTAssertTrue(body.contains("Content-Type: application/octet-stream\r\n\r\n"))
+            return (201, Data(#"{"signed_id":"detected-image","content_type":"image/webp","animated":false}"#.utf8))
+        }
+        let upload = try await client.uploadImage(data: Data([1]), fileName: "image.bin", mimeType: "application/octet-stream")
+        XCTAssertEqual(upload.signedID, "detected-image")
+        XCTAssertEqual(upload.contentType, "image/webp")
+    }
+
+    func testImageUploadInvalidInputNeverSendsRequest() async throws {
         APIURLProtocol.handler = { _ in XCTFail("Should not send request"); return (500, Data()) }
-        let client = ImgBBClient(session: session)
-        let imageURL = URL(string: "https://i.ibb.co/img/photo.png")!
-        for value in ["https://example.com/img/token", "http://ibb.co/img/token",
-                      "https://ibb.co:8443/img/token", "https://ibb.co/img/token?key=secret",
-                      "https://ibb.co/img/%2Ftoken", "https://ibb.co/img/"] {
-            do {
-                try await client.delete(ImgBBUpload(url: imageURL, deleteURL: URL(string: value)!), apiKey: "secret")
-                XCTFail("Expected unsafe delete URL: \(value)")
-            } catch ImgBBError.unsafeDeleteURL { }
-        }
-        do {
-            try await client.delete(ImgBBUpload(url: imageURL,
-                                                deleteURL: URL(string: "https://ibb.co/img/token")!), apiKey: "")
-            XCTFail("Expected missing API key")
-        } catch ImgBBError.missingAPIKey { }
-    }
-
-    func testImgBBDeleteReportsHTTPFailure() async throws {
-        APIURLProtocol.handler = { _ in (403, Data()) }
-        let client = ImgBBClient(session: session)
-        do {
-            try await client.delete(ImgBBUpload(url: URL(string: "https://i.ibb.co/img/photo.png")!,
-                                                deleteURL: URL(string: "https://ibb.co/img/token")!), apiKey: "secret")
-            XCTFail("Expected HTTP failure")
-        } catch ImgBBError.server(let status) {
-            XCTAssertEqual(status, 403)
+        for (data, mimeType) in [(Data(), "image/png"), (Data([1]), "plain"),
+                                 (Data([1]), "image/png\r\nX-Access-Token: stolen")] {
+            do { _ = try await client.uploadImage(data: data, fileName: "photo.png", mimeType: mimeType); XCTFail("Expected invalid image") }
+            catch { XCTAssertEqual(error as? ImageUploadError, .invalidImage) }
         }
     }
 
-    func testComposerMessageAppendsImageURLsInOrder() {
-        let urls = ["https://i.ibb.co/second.png", "https://i.ibb.co/first.png"].map { URL(string: $0)! }
-        XCTAssertEqual(ComposerMessage.text(" hello \n", imageURLs: urls),
-                       "hello\nhttps://i.ibb.co/second.png\nhttps://i.ibb.co/first.png")
-        XCTAssertEqual(ComposerMessage.text("  ", imageURLs: urls),
-                       "https://i.ibb.co/second.png\nhttps://i.ibb.co/first.png")
+    func testImageUploadSharesAuthenticationRedirectAndRedactedServerErrors() async throws {
+        APIURLProtocol.handler = { _ in (401, Data()) }
+        do { _ = try await client.uploadImage(data: Data([1]), fileName: "photo.png", mimeType: "image/png"); XCTFail("Expected unauthorized") }
+        catch { XCTAssertEqual(error as? APIError, .unauthorized) }
+
+        APIURLProtocol.handler = { _ in (302, Data()) }
+        do { _ = try await client.uploadImage(data: Data([1]), fileName: "photo.png", mimeType: "image/png"); XCTFail("Expected unsafe redirect") }
+        catch { XCTAssertEqual(error as? APIError, .unsafeRedirect) }
+
+        APIURLProtocol.handler = { _ in (422, Data(#"{"message":"Rejected private-test-token"}"#.utf8)) }
+        do { _ = try await client.uploadImage(data: Data([1]), fileName: "photo.png", mimeType: "image/png"); XCTFail("Expected upload error") }
+        catch { XCTAssertEqual(error as? APIError, .server(status: 422, message: "Rejected [redacted]")) }
+    }
+
+    func testImageUploadRejectsMissingOrEmptySignedReference() async throws {
+        for payload in [#"{"content_type":"image/webp","animated":false}"#,
+                        #"{"signed_id":"","content_type":"image/webp","animated":false}"#,
+                        "<html>Invalid response</html>"] {
+            APIURLProtocol.handler = { _ in (201, Data(payload.utf8)) }
+            do { _ = try await client.uploadImage(data: Data([1]), fileName: "photo.png", mimeType: "image/png"); XCTFail("Expected invalid response") }
+            catch { XCTAssertEqual(error as? APIError, .invalidResponse) }
+        }
+    }
+
+    func testImageOnlyMessageKeepsSignedReferencesInProvidedOrderWithoutAddingURLsToText() async throws {
+        APIURLProtocol.handler = { request in
+            let body = try Self.readBody(request)
+            XCTAssertEqual(body["message"] as? String, "")
+            XCTAssertEqual(body["image_signed_ids"] as? [String], ["second-signed-id", "first-signed-id"])
+            XCTAssertEqual(body["expand_embed_contents"] as? Bool, true)
+            return (201, Data(Self.message.utf8))
+        }
+        _ = try await client.sendMessage(channelID: "CHANNEL01", text: "", imageSignedIDs: ["second-signed-id", "first-signed-id"])
+    }
+
+    func testImageAttachmentDoesNotChangeTextAndRetainsUnicodeScalarLimit() async throws {
+        let text = String(repeating: "e\u{301}", count: 2000)
+        APIURLProtocol.handler = { request in
+            let body = try Self.readBody(request)
+            XCTAssertEqual(body["message"] as? String, text)
+            XCTAssertEqual(body["image_signed_ids"] as? [String], ["signed-id"])
+            return (201, Data(Self.message.utf8))
+        }
+        _ = try await client.sendMessage(channelID: "CHANNEL01", text: text, imageSignedIDs: ["signed-id"])
+        APIURLProtocol.handler = { _ in XCTFail("Too-long text should not send request"); return (500, Data()) }
+        do { _ = try await client.sendMessage(channelID: "CHANNEL01", text: text + "x", imageSignedIDs: ["signed-id"]); XCTFail("Expected invalid message") }
+        catch { XCTAssertEqual(error as? APIError, .invalidMessage) }
     }
 
     private static func readBody(_ request: URLRequest) throws -> [String: Any] {

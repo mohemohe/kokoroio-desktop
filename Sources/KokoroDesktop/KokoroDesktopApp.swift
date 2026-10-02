@@ -143,18 +143,6 @@ private struct SettingsView: View {
                 Text("通知").scaledFont(.caption1)
             }
             Section {
-                SecureField("ImgBB の API キー", text: Binding(
-                    get: { store.imgBBAPIKey },
-                    set: { store.updateImgBBAPIKey($0) }
-                ))
-                .textFieldStyle(.roundedBorder)
-                Text("API キーは Mac の Keychain に保存されます。入力すると投稿欄から画像を追加できます。")
-                    .scaledFont(.caption1).foregroundStyle(.secondary)
-                if let error = store.imgBBSettingsError { Text(error).foregroundStyle(.red) }
-            } header: {
-                Text("画像アップロード").scaledFont(.caption1)
-            }
-            Section {
                 LabeledContent("サーバー", value: store.serverURL)
                 if let profile = store.profile { LabeledContent("アカウント", value: "@" + profile.screenName) }
                 if store.isSignedIn {

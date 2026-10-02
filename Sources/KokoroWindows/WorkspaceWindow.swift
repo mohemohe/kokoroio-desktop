@@ -94,8 +94,6 @@ final class WorkspaceWindow {
             return
         }
         registerNotifications()
-        do { store.updateImgBBAPIKey(try WindowsImgBBKeyStore.load() ?? "") }
-        catch { store.reportError(error.localizedDescription) }
         Task { [weak self] in
             guard let self else { return }
             do { if let saved = try WindowsCredentialStore.load() { server.text = saved.server; await store.signIn(server: saved.server, token: saved.token) } }
@@ -433,7 +431,7 @@ final class WorkspaceWindow {
         _ = try? scroll.changeView(nil, scroll.scrollableHeight, nil, true); store.isAtBottom = true; latest.visibility = .collapsed; Task { await store.markRead() }
     }
     private func addImages() {
-        guard store.hasImgBBAPIKey else { return }
+        guard !store.isSending, store.selectedChannel?.membership?.canPost == true else { return }
         do { store.addImages(try WindowsPlatformServices.pickImages()) } catch { store.reportError("画像を選択できませんでした: " + error.localizedDescription) }
     }
     private func showEmojiPicker() {
@@ -469,7 +467,7 @@ final class WorkspaceWindow {
                 var failures: [String] = []
                 if ["search", "long-draft", "minimum-size"].contains(name) || name.hasPrefix("workspace") || name.hasPrefix("attachment-") {
                     failures += WindowsUIAudit.validateWorkspace(audit, channelName: store.selectedChannel!.name, connectionLabel: store.connectionLabel, searchOpen: store.isSearchOpen)
-                    failures += WindowsUIAudit.validateComposer(audit, channelName: store.selectedChannel!.name, hasImageKey: store.hasImgBBAPIKey, canSend: store.canSend)
+                    failures += WindowsUIAudit.validateComposer(audit, channelName: store.selectedChannel!.name, canAttach: store.selectedChannel?.membership?.canPost == true, canSend: store.canSend)
                 } else if name.hasPrefix("settings") {
                     failures += WindowsUIAudit.validateSettings(audit, signedIn: true, notificationsEnabled: store.notificationsEnabled)
                 }
@@ -577,7 +575,7 @@ final class WorkspaceWindow {
         store.togglePin(first); check(store.channelSections.first?.channels.contains { $0.id == first } == true, "pinned section")
         check(sidebar?.selectedVisibleRowCount == 1, "one sidebar selection including pinned duplicate")
         check(sidebar?.displayedConnectionLabel == store.connectionLabel, "sidebar connection indicator")
-        check(!composerView.attach.isEnabled, "image disabled without API key")
+        check(composerView.attach.isEnabled, "image enabled for a writable channel")
         check(composer.placeholderText == store.selectedChannel!.name + " にメッセージを送信", "composer placeholder")
         scrollToBottom(); try? await Task.sleep(for: .milliseconds(300)); await snapshot("workspace")
         _ = try? scroll.changeView(nil, 0, nil, true); try? await Task.sleep(for: .milliseconds(100)); updateTimelineActions()
@@ -599,8 +597,7 @@ final class WorkspaceWindow {
         composer.text = "test"; try? composer.select(4, 0); insertEmoji("😀"); check(store.draft == "test😀" && composer.selectionStart == 6, "emoji insertion")
         if let smokeImages {
             // The app's own captured fixture is also a local image-picker input.
-            // All upload/deletion operations are held in the injected service.
-            store.updateImgBBAPIKey("smoke-only-key")
+            // Upload completion is held in the injected service.
             store.addImages([output.appendingPathComponent("workspace.bmp")])
             for _ in 0..<100 {
                 if await smokeImages.pendingUploadCount > 0 { break }
@@ -613,15 +610,8 @@ final class WorkspaceWindow {
             check(store.canSend && store.composerImages.first?.upload != nil, "attachment ready")
             await snapshot("attachment-ready")
             store.removeImage(store.composerImages[0].id)
-            for _ in 0..<100 {
-                if await smokeImages.pendingDeleteCount > 0 { break }
-                try? await Task.sleep(for: .milliseconds(20))
-            }
-            check(await smokeImages.pendingDeleteCount == 1 && !store.canSend, "attachment deleting")
-            await snapshot("attachment-deleting")
-            check(await smokeImages.completeNextDelete(), "complete fixture deletion")
-            try? await Task.sleep(for: .milliseconds(100))
-            check(store.composerImages.isEmpty, "attachment removed")
+            check(store.composerImages.isEmpty, "attachment removed locally")
+            await snapshot("attachment-removed")
             store.addImages([output.appendingPathComponent("workspace.bmp")])
             for _ in 0..<100 {
                 if await smokeImages.pendingUploadCount > 0 { break }
@@ -633,7 +623,6 @@ final class WorkspaceWindow {
             await snapshot("attachment-failed")
             store.removeImage(store.composerImages[0].id)
             check(store.composerImages.isEmpty, "failed attachment removed")
-            store.updateImgBBAPIKey("")
             await smokeImages.shutdown()
         }
         let scale = (window.content as? FrameworkElement)?.xamlRoot?.rasterizationScale ?? 1

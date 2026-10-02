@@ -17,6 +17,7 @@ private final class FakeService: WindowsChatService {
     var suspendFetch = false
     var readIDs: [Int] = []
     var sentTexts: [String] = []
+    var sentImageSignedIDs: [[String]] = []
     var searchCalls: [(String, String)] = []
     var searchResults: [Message] = []
     var suspendSearch = false
@@ -29,9 +30,10 @@ private final class FakeService: WindowsChatService {
         return [message(id: 1, channel: channelID)]
     }
     func fetchUnreadCount(channelID: String, after: Int, excludingProfileID: String) async throws -> Int { 0 }
-    func sendMessage(channelID: String, text: String, idempotentKey: String) async throws -> Message {
+    func sendMessage(channelID: String, text: String, imageSignedIDs: [String], idempotentKey: String) async throws -> Message {
         sendKeys.append(idempotentKey)
         sentTexts.append(text)
+        sentImageSignedIDs.append(imageSignedIDs)
         if failSend { throw APIError.invalidResponse }
         if suspendSend { return try await withCheckedThrowingContinuation { pendingSend = $0 } }
         return message(id: 2, channel: channelID, text: text)
@@ -52,30 +54,28 @@ private final class FakeService: WindowsChatService {
 }
 
 private actor FakeImageService: WindowsImageService {
-    var uploads: [(String, String)] = []
-    var deletions: [(URL, String)] = []
+    var uploads: [(fileName: String, mimeType: String)] = []
     var suspendUpload = false
     var failUpload = false
-    var failDelete = false
-    var pendingUploads: [CheckedContinuation<ImgBBUpload, Error>] = []
+    var pendingUploads: [(ImageUpload, CheckedContinuation<ImageUpload, Error>)] = []
     var uploadCount: Int { uploads.count }
     var pendingCount: Int { pendingUploads.count }
-    var deletionCount: Int { deletions.count }
     func setSuspended(_ value: Bool) { suspendUpload = value }
     func setUploadFailure(_ value: Bool) { failUpload = value }
-    func setDeleteFailure(_ value: Bool) { failDelete = value }
-    func upload(data: Data, fileName: String, mimeType: String, apiKey: String) async throws -> ImgBBUpload {
-        uploads.append((fileName, apiKey))
-        if failUpload { throw ImgBBError.server(500) }
-        if suspendUpload { return try await withCheckedThrowingContinuation { pendingUploads.append($0) } }
-        return Self.result
+    func uploadImage(data: Data, fileName: String, mimeType: String) async throws -> ImageUpload {
+        uploads.append((fileName, mimeType))
+        if failUpload { throw APIError.server(status: 500, message: "Upload failed") }
+        let result = Self.result(for: fileName)
+        if suspendUpload { return try await withCheckedThrowingContinuation { pendingUploads.append((result, $0)) } }
+        return result
     }
-    func delete(_ upload: ImgBBUpload, apiKey: String) async throws {
-        deletions.append((upload.url, apiKey))
-        if failDelete { throw ImgBBError.server(500) }
+    func finishUpload(at index: Int = 0) {
+        let (result, continuation) = pendingUploads.remove(at: index)
+        continuation.resume(returning: result)
     }
-    func finishUpload() { pendingUploads.removeFirst().resume(returning: Self.result) }
-    static let result = ImgBBUpload(url: URL(string: "https://i.ibb.co/test/image.png")!, deleteURL: URL(string: "https://ibb.co/image/delete")!)
+    static func result(for fileName: String) -> ImageUpload {
+        ImageUpload(signedID: "signed-" + fileName, contentType: "image/png", animated: false)
+    }
 }
 
 final class WindowsChatStoreTests: XCTestCase {
@@ -94,8 +94,8 @@ final class WindowsChatStoreTests: XCTestCase {
         return UserDefaults(suiteName: suite)!
     }
 
-    private func temporaryImage() throws -> URL {
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("kokoro-test-\(UUID().uuidString).png")
+    private func temporaryImage(fileExtension: String = "png") throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("kokoro-test-\(UUID().uuidString).\(fileExtension)")
         try Data([137, 80, 78, 71, 13, 10, 26, 10]).write(to: url)
         temporaryImages.append(url)
         return url
@@ -238,11 +238,10 @@ final class WindowsChatStoreTests: XCTestCase {
 
     @MainActor
     func testImageUploadStaysWithItsChannelAndImageOnlyMessageCanSend() async throws {
-        let service = FakeService(), images = FakeImageService()
+        let service = FakeService(), images = FakeImageService(), url = try temporaryImage()
         await images.setSuspended(true)
         let store = await connected(service, imageService: images)
-        store.updateImgBBAPIKey(" key ")
-        store.addImages([try temporaryImage()])
+        store.addImages([url])
         XCTAssertFalse(store.canSend)
         await waitUntil { await images.pendingCount == 1 }
         await store.selectChannel("CHAN02")
@@ -251,117 +250,181 @@ final class WindowsChatStoreTests: XCTestCase {
         await store.selectChannel("CHAN01")
         await waitUntil { store.composerImages.first?.isUploading == false }
         XCTAssertTrue(store.canSend)
-        XCTAssertEqual(store.composedDraft, FakeImageService.result.url.absoluteString)
+        XCTAssertEqual(store.composedDraft, "")
         await store.send()
-        XCTAssertEqual(service.sentTexts, [FakeImageService.result.url.absoluteString])
+        XCTAssertEqual(service.sentTexts, [""])
+        XCTAssertEqual(service.sentImageSignedIDs, [[FakeImageService.result(for: url.lastPathComponent).signedID]])
         XCTAssertTrue(store.composerImages.isEmpty)
         XCTAssertFalse(store.canSend)
         let uploads = await images.uploads
-        XCTAssertEqual(uploads.first?.1, "key")
+        XCTAssertEqual(uploads.first?.mimeType, "image/png")
     }
 
     @MainActor
-    func testFailedUploadBlocksSendAndRetriesWithUpdatedKey() async throws {
+    func testOfficialImageFormatsReachUploadServiceWithoutLegacySignatureChecks() async throws {
+        let images = FakeImageService(), store = await connected(FakeService(), imageService: images)
+        let formats = [("avif", "image/avif"), ("heic", "image/heic"), ("heif", "image/heif"),
+                       ("tiff", "image/tiff"), ("tif", "image/tiff"), ("unknown", "application/octet-stream")]
+        let urls = try formats.map { try temporaryImage(fileExtension: $0.0) }
+        store.addImages(urls)
+        await waitUntil { store.composerImages.allSatisfy { !$0.isUploading } }
+        XCTAssertTrue(store.canSend)
+        XCTAssertTrue(store.composerImages.allSatisfy { $0.upload != nil && $0.error == nil })
+        let uploads = await images.uploads
+        for (url, format) in zip(urls, formats) {
+            XCTAssertEqual(uploads.first { $0.fileName == url.lastPathComponent }?.mimeType, format.1)
+        }
+    }
+
+    @MainActor
+    func testFailedUploadBlocksSendAndCanBeRetried() async throws {
         let images = FakeImageService()
         await images.setUploadFailure(true)
         let store = await connected(FakeService(), imageService: images)
-        store.updateImgBBAPIKey("wrong-key"); store.draft = "photo"
+        store.draft = "photo"
         store.addImages([try temporaryImage()])
         await waitUntil { store.composerImages.first?.error != nil }
         XCTAssertFalse(store.canSend)
         await images.setUploadFailure(false)
-        store.updateImgBBAPIKey("correct-key")
         store.retryImage(store.composerImages[0].id)
         await waitUntil { store.composerImages.first?.upload != nil }
         XCTAssertTrue(store.canSend)
         XCTAssertNil(store.composerImages.first?.error)
-        let uploads = await images.uploads
-        XCTAssertEqual(uploads.map { $0.1 }, ["wrong-key", "correct-key"])
+        let count = await images.uploadCount
+        XCTAssertEqual(count, 2)
     }
 
     @MainActor
-    func testRemovingPendingUploadDeletesAfterCompletionWithoutCrossingChannels() async throws {
+    func testRemovingPendingUploadDiscardsItsLateResultWithoutCrossingChannels() async throws {
         let images = FakeImageService()
         await images.setSuspended(true)
         let store = await connected(FakeService(), imageService: images)
-        store.updateImgBBAPIKey("original-key")
         store.addImages([try temporaryImage()])
         await waitUntil { await images.pendingCount == 1 }
         store.removeImage(store.composerImages[0].id)
-        await store.selectChannel("CHAN02")
-        store.updateImgBBAPIKey("new-key")
-        await images.finishUpload()
-        await waitUntil { await images.deletionCount == 1 }
-        await store.selectChannel("CHAN01")
-        await waitUntil { store.composerImages.isEmpty }
-        let deletions = await images.deletions
-        XCTAssertEqual(deletions.first?.1, "original-key")
-    }
-
-    @MainActor
-    func testLateUploadAfterSignOutIsCleanedUpWithoutRestoringDraft() async throws {
-        let images = FakeImageService()
-        await images.setSuspended(true)
-        let store = await connected(FakeService(), imageService: images)
-        store.updateImgBBAPIKey("key"); store.addImages([try temporaryImage()])
-        await waitUntil { await images.pendingCount == 1 }
-        store.signOut()
-        await images.finishUpload()
-        await waitUntil { await images.deletionCount == 1 }
         XCTAssertTrue(store.composerImages.isEmpty)
-        XCTAssertNil(store.selectedChannelID)
+        await store.selectChannel("CHAN02")
+        store.addImages([try temporaryImage()])
+        await waitUntil { await images.pendingCount == 2 }
+        let otherImageID = store.composerImages[0].id
+        await images.finishUpload()
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertEqual(store.composerImages.map(\.id), [otherImageID])
+        XCTAssertNil(store.composerImages[0].upload)
+        await images.finishUpload()
+        await waitUntil { store.composerImages[0].upload != nil }
+        await store.selectChannel("CHAN01")
+        XCTAssertTrue(store.composerImages.isEmpty)
     }
 
     @MainActor
-    func testSignOutDuringSendDoesNotDeleteAnImageThatMayAlreadyBePosted() async throws {
+    func testLateUploadAfterAccountChangeDoesNotRestoreOldDraft() async throws {
+        let service = FakeService(), images = FakeImageService()
+        await images.setSuspended(true)
+        let store = await connected(service, imageService: images)
+        store.draft = "old account"
+        store.addImages([try temporaryImage()])
+        await waitUntil { await images.pendingCount == 1 }
+        service.user = Profile(id: "USER02")
+        let signedIn = await store.signIn(server: "http://localhost:9999", token: "other-token")
+        XCTAssertTrue(signedIn)
+        store.draft = "new account"
+        store.addImages([try temporaryImage()])
+        await waitUntil { await images.pendingCount == 2 }
+        let newImageID = store.composerImages[0].id
+        await images.finishUpload()
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertEqual(store.draft, "new account")
+        XCTAssertEqual(store.composerImages.map(\.id), [newImageID])
+        XCTAssertNil(store.composerImages[0].upload)
+        await images.finishUpload()
+        await waitUntil { store.composerImages[0].upload != nil }
+        XCTAssertEqual(store.profile?.id, "USER02")
+        XCTAssertEqual(store.draft, "new account")
+        XCTAssertEqual(store.composerImages.map(\.id), [newImageID])
+    }
+
+    @MainActor
+    func testSignOutDuringSendDiscardsResponseAndAttachments() async throws {
         let service = FakeService(), images = FakeImageService(), store = await connected(service, imageService: images)
-        store.updateImgBBAPIKey("key"); store.addImages([try temporaryImage()])
+        store.addImages([try temporaryImage()])
         await waitUntil { store.composerImages.first?.upload != nil }
         service.suspendSend = true
         let sending = Task { await store.send() }
         await waitUntil { service.pendingSend != nil }
         store.signOut()
-        service.pendingSend?.resume(returning: service.message(id: 2, text: FakeImageService.result.url.absoluteString))
+        service.pendingSend?.resume(returning: service.message(id: 2, text: ""))
         await sending.value
-        let deletions = await images.deletionCount
-        XCTAssertEqual(deletions, 0)
         XCTAssertTrue(store.composerImages.isEmpty)
         XCTAssertTrue(store.messages.isEmpty)
     }
 
     @MainActor
-    func testFailedImageDeletionCanBeRetried() async throws {
+    func testRemovingReadyImageDiscardsItLocally() async throws {
         let images = FakeImageService(), store = await connected(FakeService(), imageService: images)
-        store.updateImgBBAPIKey("key"); store.addImages([try temporaryImage()])
+        store.addImages([try temporaryImage()])
         await waitUntil { store.composerImages.first?.upload != nil }
-        let id = store.composerImages[0].id
-        await images.setDeleteFailure(true)
-        store.removeImage(id)
-        await waitUntil { store.composerImages.first?.error != nil }
+        store.removeImage(store.composerImages[0].id)
+        XCTAssertTrue(store.composerImages.isEmpty)
         XCTAssertFalse(store.canSend)
-        await images.setDeleteFailure(false)
-        store.retryImage(id)
-        await waitUntil { store.composerImages.isEmpty }
-        let deletions = await images.deletionCount
-        XCTAssertEqual(deletions, 2)
     }
 
     @MainActor
-    func testImageURLsCountAgainstMessageLimitAndFailedSendPreservesAttachment() async throws {
+    func testPreviewOrderDeterminesSignedIDOrderAfterOutOfOrderUploadCompletion() async throws {
+        let service = FakeService(), images = FakeImageService()
+        await images.setSuspended(true)
+        let store = await connected(service, imageService: images)
+        let firstURL = try temporaryImage(), secondURL = try temporaryImage()
+        store.addImages([firstURL, secondURL])
+        let firstID = store.composerImages[0].id, secondID = store.composerImages[1].id
+        store.moveImage(firstID, to: 1)
+        await waitUntil { await images.pendingCount == 2 }
+        await images.finishUpload(at: 1)
+        await images.finishUpload()
+        await waitUntil { store.composerImages.allSatisfy { !$0.isUploading } }
+        XCTAssertEqual(store.composerImages.map(\.id), [secondID, firstID])
+        let expected = [secondURL, firstURL].map { FakeImageService.result(for: $0.lastPathComponent).signedID }
+        XCTAssertEqual(store.imageSignedIDs, expected)
+        await store.send()
+        XCTAssertEqual(service.sentImageSignedIDs, [expected])
+        XCTAssertEqual(service.sentTexts, [""])
+    }
+
+    @MainActor
+    func testImagesDoNotConsumeTextLimitAndFailedSendPreservesSignedIDs() async throws {
         let service = FakeService(), images = FakeImageService(), store = await connected(service, imageService: images)
-        store.updateImgBBAPIKey("key"); store.addImages([try temporaryImage()])
+        store.addImages([try temporaryImage()])
         await waitUntil { store.composerImages.first?.upload != nil }
+        let signedIDs = store.imageSignedIDs
         store.draft = String(repeating: "a", count: 4000)
+        XCTAssertTrue(store.canSend)
+        store.draft.append("a")
         XCTAssertFalse(store.canSend)
         store.draft = "with photo"; service.failSend = true
         await store.send()
-        XCTAssertEqual(store.composerImages.count, 1)
+        XCTAssertEqual(store.imageSignedIDs, signedIDs)
         XCTAssertEqual(store.draft, "with photo")
         service.failSend = false
         await store.send()
         XCTAssertEqual(service.sendKeys[0], service.sendKeys[1])
-        XCTAssertEqual(service.sentTexts[0], "with photo\n" + FakeImageService.result.url.absoluteString)
+        XCTAssertEqual(service.sentTexts, ["with photo", "with photo"])
+        XCTAssertEqual(service.sentImageSignedIDs, [signedIDs, signedIDs])
         XCTAssertTrue(store.composerImages.isEmpty)
+    }
+
+    @MainActor
+    func testReorderingAfterFailedSendUsesNewIdempotencyKey() async throws {
+        let service = FakeService(), images = FakeImageService(), store = await connected(service, imageService: images)
+        store.addImages([try temporaryImage(), try temporaryImage()])
+        await waitUntil { store.composerImages.allSatisfy { !$0.isUploading } }
+        service.failSend = true
+        await store.send()
+        let original = store.imageSignedIDs
+        store.moveImage(store.composerImages[0].id, to: 1)
+        service.failSend = false
+        await store.send()
+        XCTAssertNotEqual(service.sendKeys[0], service.sendKeys[1])
+        XCTAssertEqual(service.sentImageSignedIDs, [original, Array(original.reversed())])
     }
 
     @MainActor

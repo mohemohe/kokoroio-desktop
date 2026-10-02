@@ -20,7 +20,7 @@ public enum APIError: Error, LocalizedError, Equatable {
         case .unauthorized: return "アクセストークンが無効です。設定から接続し直してください。"
         case let .server(status, message): return "\(message) (HTTP \(status))"
         case .unsafeRedirect: return "認証情報を保護するため、別の接続先へのリダイレクトを停止しました。"
-        case .invalidMessage: return "メッセージは 1〜4,000 文字で入力してください。"
+        case .invalidMessage: return "メッセージには本文または画像が必要です。本文は 4,000 文字以内で入力してください。"
         }
     }
 }
@@ -96,12 +96,38 @@ public final class APIClient: @unchecked Sendable {
         }
     }
 
-    public func sendMessage(channelID: String, text: String, idempotentKey: String = UUID().uuidString.lowercased()) async throws -> Message {
+    public func sendMessage(channelID: String, text: String, imageSignedIDs: [String] = [], idempotentKey: String = UUID().uuidString.lowercased()) async throws -> Message {
         try validateID(channelID)
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, text.unicodeScalars.count <= 4000 else { throw APIError.invalidMessage }
+        guard text.unicodeScalars.count <= 4000,
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !imageSignedIDs.isEmpty else { throw APIError.invalidMessage }
         return try await request(path: ["channels", channelID, "messages"], method: "POST", body: [
-            "message": text, "idempotent_key": idempotentKey.lowercased(), "expand_embed_contents": true
+            "message": text, "image_signed_ids": imageSignedIDs,
+            "idempotent_key": idempotentKey.lowercased(), "expand_embed_contents": true
         ])
+    }
+
+    /// Uploads an image to the connected server. The signed ID is submitted separately from message text.
+    public func uploadImage(data: Data, fileName: String, mimeType: String) async throws -> ImageUpload {
+        // The server detects the image format from bytes, including generic binary uploads.
+        let mimeParts = mimeType.split(separator: "/", omittingEmptySubsequences: false)
+        let mimeTokenPunctuation = Set("!#$%&'*+-.^_`|~".utf8)
+        guard !data.isEmpty, mimeParts.count == 2, mimeParts.allSatisfy({ part in
+            !part.isEmpty && part.utf8.allSatisfy { byte in
+                (0x30...0x39).contains(byte) || (0x41...0x5A).contains(byte) || (0x61...0x7A).contains(byte)
+                    || mimeTokenPunctuation.contains(byte)
+            }
+        }) else { throw ImageUploadError.invalidImage }
+        let boundary = "KokoroImage-\(UUID().uuidString)"
+        let safeFileName = fileName.unicodeScalars.map { scalar in
+            scalar.value < 0x20 || scalar.value == 0x7F || scalar == "\"" || scalar == "\\" ? "_" : String(scalar)
+        }.joined()
+        var body = Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"\(safeFileName.isEmpty ? "image" : safeFileName)\"\r\nContent-Type: \(mimeType)\r\n\r\n".utf8)
+        body.append(data)
+        body.append(Data("\r\n--\(boundary)--\r\n".utf8))
+        let upload: ImageUpload = try await request(path: ["image_uploads"], method: "POST", rawBody: body,
+                                                   contentType: "multipart/form-data; boundary=\(boundary)", timeoutInterval: 120)
+        guard !upload.signedID.isEmpty else { throw APIError.invalidResponse }
+        return upload
     }
 
     /// The API updates the cursor but currently leaves unread_count unchanged; callers should
@@ -116,7 +142,8 @@ public final class APIClient: @unchecked Sendable {
         guard !id.isEmpty, id.unicodeScalars.allSatisfy({ CharacterSet.alphanumerics.contains($0) }) else { throw APIError.invalidIdentifier }
     }
 
-    private func request<T: Decodable>(path: [String], method: String = "GET", query: [URLQueryItem] = [], body: [String: Any]? = nil) async throws -> T {
+    private func request<T: Decodable>(path: [String], method: String = "GET", query: [URLQueryItem] = [], body: [String: Any]? = nil,
+                                       rawBody: Data? = nil, contentType: String? = nil, timeoutInterval: TimeInterval = 30) async throws -> T {
         let validated = try Self.validatedServerURL(baseURL.absoluteString)
         var url = validated.appendingPathComponent("api").appendingPathComponent("v1")
         for component in path { url.appendPathComponent(component) }
@@ -125,11 +152,14 @@ public final class APIClient: @unchecked Sendable {
         guard let endpoint = components.url else { throw APIError.invalidServerURL }
         var request = URLRequest(url: endpoint)
         request.httpMethod = method
-        request.timeoutInterval = 30
+        request.timeoutInterval = timeoutInterval
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue(token, forHTTPHeaderField: "X-Access-Token")
-        if let body {
+        if let rawBody {
+            request.setValue(contentType, forHTTPHeaderField: "Content-Type")
+            request.httpBody = rawBody
+        } else if let body {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
         }

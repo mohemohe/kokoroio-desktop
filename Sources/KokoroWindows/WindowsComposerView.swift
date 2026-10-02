@@ -132,12 +132,11 @@ final class WindowsComposerView {
         guard !disposed else { return }
         editor.placeholderText = "\(store.selectedChannel?.name ?? "チャンネル") にメッセージを送信"
         editor.isEnabled = !store.isSending
-        attach.isEnabled = store.hasImgBBAPIKey && !store.isSending && store.selectedChannelID != nil
-        attach.opacity = store.hasImgBBAPIKey ? 0.7 : 0.35
+        attach.isEnabled = !store.isSending && store.selectedChannel?.membership?.canPost == true
+        attach.opacity = attach.isEnabled ? 0.7 : 0.35
         emoji.isEnabled = !store.isSending
         emoji.opacity = 0.7
-        try? ToolTipService.setToolTip(attach,
-            store.hasImgBBAPIKey ? "画像を追加" : "設定で ImgBB の API キーを入力してください")
+        try? ToolTipService.setToolTip(attach, "画像を追加")
         send.isEnabled = store.canSend
         sendGlyph.visibility = store.isSending ? .collapsed : .visible
         sending.visibility = store.isSending ? .visible : .collapsed
@@ -184,7 +183,7 @@ final class WindowsComposerView {
         previewScroll.visibility = images.isEmpty ? .collapsed : .visible
         previewDivider.visibility = images.isEmpty ? .collapsed : .visible
         let signature = "\(store.selectedChannelID ?? ""): \(store.isSending) " + images.map {
-            "\($0.id):\($0.localURL):\($0.isUploading):\($0.isDeleting):\($0.error ?? "")"
+            "\($0.id):\($0.localURL):\($0.isUploading):\($0.error ?? "")"
         }.joined(separator: "|")
         guard signature != previewSignature else { return }
         previewSignature = signature
@@ -210,7 +209,7 @@ final class WindowsComposerView {
             previewControls.append(contentsOf: [thumbnail, frame, preview])
             previewImages.append(preview)
             previewBitmaps.append(bitmap)
-            if image.isUploading || image.isDeleting {
+            if image.isUploading {
                 let overlay = Border()
                 overlay.background = brush(0, 0, 0, alpha: 77)
                 overlay.cornerRadius = frame.cornerRadius
@@ -253,7 +252,7 @@ final class WindowsComposerView {
             remove.foreground = brush(255, 255, 255)
             remove.horizontalAlignment = .right
             remove.verticalAlignment = .top
-            remove.isEnabled = !store.isSending && !image.isDeleting
+            remove.isEnabled = !store.isSending
             try? AutomationProperties.setName(remove, "\(image.fileName) を削除")
             previewEvents.append(remove.click.addHandler { [weak self] _, _ in self?.store.removeImage(image.id) })
             thumbnail.children.append(remove)

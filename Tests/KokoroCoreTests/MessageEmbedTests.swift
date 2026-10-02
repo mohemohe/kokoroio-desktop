@@ -30,6 +30,62 @@ final class MessageEmbedTests: XCTestCase {
         XCTAssertEqual(message.embedContents[1].cardThumbnailURL?.absoluteString, "https://images.example.test/og-thumb.png")
     }
 
+    func testOfficialUploadedImageEnvelopeDecodesWithoutURLPreviewData() throws {
+        let message = try decodeMessage(messageJSON(embeds: [
+            ["url": NSNull(), "position": 1, "data": ["type": "UploadedImage"], "image": [
+                "url": "https://chat.example.test/media/animated.gif", "thumbnail_url": "https://chat.example.test/media/animated-thumb.webp",
+                "content_type": "image/gif", "animated": true]],
+            ["url": NSNull(), "position": 0, "image": [
+                "url": "https://chat.example.test/media/static.webp", "thumbnail_url": "https://chat.example.test/media/static-thumb.webp",
+                "content_type": "image/webp", "animated": false]]
+        ]))
+        XCTAssertEqual(message.embedContents.map(\.position), [0, 1])
+        XCTAssertTrue(message.embedContents.allSatisfy(\.isUploadedImage))
+        XCTAssertTrue(message.embedContents.allSatisfy(\.isImageOnly))
+        XCTAssertTrue(message.embedContents.allSatisfy { !$0.hasUnavailableImage })
+        XCTAssertNil(message.embedContents[0].url)
+        XCTAssertNil(message.embedContents[0].data)
+        XCTAssertEqual(message.embedContents[0].image?.contentType, "image/webp")
+        XCTAssertEqual(message.embedContents[0].imagePreviews.first?.thumbnailURL.absoluteString, "https://chat.example.test/media/static-thumb.webp")
+        XCTAssertEqual(message.embedContents[0].imagePreviews.first?.linkURL.absoluteString, "https://chat.example.test/media/static.webp")
+        XCTAssertEqual(message.embedContents[1].image?.animated, true)
+        XCTAssertEqual(message.embedContents[1].linkURL?.absoluteString, "https://chat.example.test/media/animated.gif")
+        var fallback = MessageEmbedFallback()
+        XCTAssertNil(fallback.nextRequest(in: [message]), "Official image URLs must not trigger legacy metadata recovery")
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        XCTAssertEqual(try APIJSON.decoder().decode(Message.self, from: encoder.encode(message)), message)
+    }
+
+    func testOfficialImageEnvelopeRejectsUnsafeURLsAndToleratesMalformedOptionalValues() throws {
+        let embeds = try decodeMessage(messageJSON(embeds: [
+            ["url": NSNull(), "data": ["type": "UploadedImage"], "image": [
+                "url": "file:///tmp/private.png", "thumbnail_url": "https://user:password@chat.example.test/private.png"]],
+            ["url": NSNull(), "image": ["url": "https://chat.example.test/media/full.webp", "thumbnail_url": NSNull(),
+                                            "content_type": 3, "animated": "unknown"]],
+            ["url": "https://example.test/page", "image": "bad image", "data": ["type": "MixedContent", "title": "Page"]]
+        ])).embedContents
+        XCTAssertTrue(embeds[0].hasUnavailableImage)
+        XCTAssertNil(embeds[0].linkURL)
+        XCTAssertTrue(embeds[0].imagePreviews.isEmpty)
+        XCTAssertEqual(embeds[1].imagePreviews.first?.thumbnailURL.absoluteString, "https://chat.example.test/media/full.webp")
+        XCTAssertEqual(embeds[1].image?.animated, false)
+        XCTAssertNil(embeds[1].image?.contentType)
+        XCTAssertNil(embeds[2].image)
+        XCTAssertEqual(embeds[2].cardTitle, "Page")
+    }
+
+    func testOfficialImagePreservesUnavailableAndRestrictedMetadata() {
+        let image = EmbedUploadedImage(url: URL(string: "https://chat.example.test/media/full.webp"),
+                                       thumbnailURL: URL(string: "https://chat.example.test/media/thumb.webp"))
+        let unavailable = EmbedContent(data: EmbedData(type: "UploadedImage", available: false), image: image)
+        XCTAssertTrue(unavailable.imagePreviews.isEmpty)
+        XCTAssertNil(unavailable.cardThumbnailURL)
+        let restricted = EmbedContent(data: EmbedData(type: "UploadedImage", restrictionPolicy: "Restricted"), image: image)
+        XCTAssertEqual(restricted.imagePreviews.first?.isRestricted, true)
+    }
+
     func testRealtimeMessageUpdatedDecodesResolutionAddedAfterCreation() throws {
         let payload = messageJSON(embeds: [["url": "https://example.test/article", "position": 0,
                                            "data": ["type": "MixedContent", "title": "Resolved later", "medias": []]]])

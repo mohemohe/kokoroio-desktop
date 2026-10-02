@@ -45,7 +45,7 @@ struct ComposerView: View {
                         text: $store.draft,
                         height: $editorHeight,
                         isEnabled: !store.isSending,
-                        canAcceptImages: store.hasImgBBAPIKey && store.selectedChannelID != nil && !store.isSending,
+                        canAcceptImages: store.canAddImages,
                         channelID: store.selectedChannelID,
                         emojiPickerRequest: emojiPickerRequest,
                         onSubmit: { if canSend { store.sendMessage() } },
@@ -65,12 +65,12 @@ struct ComposerView: View {
                     Button { isImagePickerPresented = true } label: {
                         Image(systemName: "photo")
                             .font(.system(size: 16))
-                            .foregroundStyle(store.hasImgBBAPIKey ? .secondary : .tertiary)
+                            .foregroundStyle(.secondary)
                             .frame(width: 28, height: 28)
                     }
                     .buttonStyle(.plain)
-                    .disabled(!store.hasImgBBAPIKey || store.isSending || store.selectedChannelID == nil)
-                    .help(store.hasImgBBAPIKey ? "画像を追加" : "設定で ImgBB の API キーを入力してください")
+                    .disabled(!store.canAddImages)
+                    .help("画像を追加")
                     .accessibilityLabel("画像を追加")
                     Button {
                         emojiPickerRequest += 1
@@ -137,7 +137,7 @@ struct ComposerView: View {
                 Task { @MainActor in store.addImages(urls) }
             case .failure(let error):
                 Task { @MainActor in
-                    if store.hasImgBBAPIKey {
+                    if store.canAddImages {
                         store.errorMessage = "画像を選択できませんでした: \(error.localizedDescription)"
                     }
                 }
@@ -163,7 +163,7 @@ struct ComposerView: View {
             .background(Color.primary.opacity(0.06))
             .clipShape(RoundedRectangle(cornerRadius: 6))
             .overlay {
-                if image.isUploading || image.isDeleting {
+                if image.isUploading {
                     ZStack {
                         Color.black.opacity(0.3)
                         ProgressView().controlSize(.small).tint(.white)
@@ -194,7 +194,7 @@ struct ComposerView: View {
                     .background(.black.opacity(0.7), in: Circle())
             }
             .buttonStyle(.plain)
-            .disabled(store.isSending || image.isDeleting)
+            .disabled(store.isSending)
             .padding(3)
             .help("画像を削除")
             .accessibilityLabel("\(image.fileName) を削除")

@@ -182,13 +182,14 @@ public struct EmbedContent: Codable, Hashable, Sendable {
     public var url: URL?
     public var position: Int
     public var data: EmbedData?
+    public var image: EmbedUploadedImage?
 
-    public init(url: URL? = nil, position: Int = 0, data: EmbedData? = nil) {
-        self.url = url; self.position = position; self.data = data
+    public init(url: URL? = nil, position: Int = 0, data: EmbedData? = nil, image: EmbedUploadedImage? = nil) {
+        self.url = url; self.position = position; self.data = data; self.image = image
     }
 
-    public var isUploadedImage: Bool { data?.type == "UploadedImage" }
-    public var isImageOnly: Bool { ["UploadedImage", "SingleImage", "photo", "image"].contains(data?.type ?? "") }
+    public var isUploadedImage: Bool { image != nil || data?.type == "UploadedImage" }
+    public var isImageOnly: Bool { image != nil || ["UploadedImage", "SingleImage", "photo", "image"].contains(data?.type ?? "") }
     public var isRestricted: Bool {
         data?.restrictionPolicy == "Restricted" || data?.metadataImage?.restrictionPolicy == "Restricted" || data?.nsfw == true
     }
@@ -197,9 +198,14 @@ public struct EmbedContent: Codable, Hashable, Sendable {
         guard let data, data.type == "MixedContent", data.available != false, linkURL != nil else { return false }
         return cardDescription == nil || (cardThumbnailURL != nil && data.metadataImageIsAuthor == nil && data.providerName == nil)
     }
-    public var linkURL: URL? { safeEmbedURL(data?.url) ?? safeEmbedURL(url) }
+    public var linkURL: URL? { safeEmbedURL(image?.url) ?? safeEmbedURL(data?.url) ?? safeEmbedURL(url) }
 
     public var imagePreviews: [EmbedImagePreview] {
+        guard data?.available != false else { return [] }
+        if let image, let thumbnail = safeEmbedURL(image.thumbnailURL) ?? safeEmbedURL(image.url),
+           let destination = safeEmbedURL(image.url) ?? safeEmbedURL(image.thumbnailURL) {
+            return [EmbedImagePreview(id: "uploaded-image", thumbnailURL: thumbnail, linkURL: destination, isRestricted: isRestricted)]
+        }
         guard let data, data.available != false else { return [] }
         var result = data.medias.enumerated().compactMap { index, media -> EmbedImagePreview? in
             let isVideo = media.type == "Video"
@@ -244,11 +250,30 @@ public struct EmbedContent: Codable, Hashable, Sendable {
         data?.metadataImageIsAuthor == true || ["Twitter", "misskey.io"].contains(data?.providerName ?? "")
     }
 
-    enum CodingKeys: String, CodingKey { case url, position, data }
+    enum CodingKeys: String, CodingKey { case url, position, data, image }
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         self.init(url: values.embedURL(forKey: .url), position: values.embedValue(Int.self, forKey: .position) ?? 0,
-                  data: values.embedValue(EmbedData.self, forKey: .data))
+                  data: values.embedValue(EmbedData.self, forKey: .data), image: values.embedValue(EmbedUploadedImage.self, forKey: .image))
+    }
+}
+
+/// Official uploads are resolved separately from the URL-preview metadata in `data`.
+public struct EmbedUploadedImage: Codable, Hashable, Sendable {
+    public var url: URL?
+    public var thumbnailURL: URL?
+    public var contentType: String?
+    public var animated: Bool
+
+    public init(url: URL? = nil, thumbnailURL: URL? = nil, contentType: String? = nil, animated: Bool = false) {
+        self.url = url; self.thumbnailURL = thumbnailURL; self.contentType = contentType; self.animated = animated
+    }
+
+    enum CodingKeys: String, CodingKey { case url, animated; case thumbnailURL = "thumbnail_url", contentType = "content_type" }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(url: values.embedURL(forKey: .url), thumbnailURL: values.embedURL(forKey: .thumbnailURL),
+                  contentType: values.embedValue(String.self, forKey: .contentType), animated: values.embedValue(Bool.self, forKey: .animated) ?? false)
     }
 }
 

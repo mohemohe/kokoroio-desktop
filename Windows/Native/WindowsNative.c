@@ -11,7 +11,6 @@
 static HMODULE bootstrap;
 static BOOL runtimeInitialized;
 static const WCHAR credentialTarget[] = L"KokoroDesktop/connection/v1";
-static const WCHAR imageCredentialTarget[] = L"KokoroDesktop/imgbb/v1";
 typedef HRESULT (WINAPI *InitializeFn)(UINT32, PCWSTR, PACKAGE_VERSION);
 typedef void (WINAPI *ShutdownFn)(void);
 
@@ -199,9 +198,6 @@ static uint32_t deleteCredential(PCWSTR target) {
 uint32_t KokoroSaveCredential(const uint8_t *bytes, uint32_t count) { return saveCredential(credentialTarget, bytes, count); }
 uint32_t KokoroLoadCredential(uint8_t *bytes, uint32_t capacity, uint32_t *count) { return loadCredential(credentialTarget, bytes, capacity, count); }
 uint32_t KokoroDeleteCredential(void) { return deleteCredential(credentialTarget); }
-uint32_t KokoroSaveImgBBKey(const uint8_t *bytes, uint32_t count) { return saveCredential(imageCredentialTarget, bytes, count); }
-uint32_t KokoroLoadImgBBKey(uint8_t *bytes, uint32_t capacity, uint32_t *count) { return loadCredential(imageCredentialTarget, bytes, capacity, count); }
-uint32_t KokoroDeleteImgBBKey(void) { return deleteCredential(imageCredentialTarget); }
 
 uint32_t KokoroPickImages(uint16_t *paths, uint32_t capacity, uint32_t *count) {
     if (!paths || !count || capacity < 2) return ERROR_INVALID_PARAMETER;
@@ -215,7 +211,7 @@ uint32_t KokoroPickImages(uint16_t *paths, uint32_t capacity, uint32_t *count) {
         if (process != GetCurrentProcessId()) owner = NULL;
     }
     if (!owner) return ERROR_INVALID_WINDOW_HANDLE;
-    static const WCHAR filter[] = L"Images (*.jpg;*.jpeg;*.png;*.gif;*.webp;*.bmp)\0*.jpg;*.jpeg;*.png;*.gif;*.webp;*.bmp\0\0";
+    static const WCHAR filter[] = L"Images (*.jpg;*.jpeg;*.png;*.gif;*.webp;*.bmp;*.tif;*.tiff;*.heic;*.heif;*.avif)\0*.jpg;*.jpeg;*.png;*.gif;*.webp;*.bmp;*.tif;*.tiff;*.heic;*.heif;*.avif\0All files (*.*)\0*.*\0\0";
     OPENFILENAMEW dialog = {0};
     dialog.lStructSize = sizeof(dialog);
     dialog.hwndOwner = owner;

@@ -6,28 +6,24 @@ public protocol WindowsChatService {
     func fetchChannels() async throws -> [Channel]
     func fetchMessages(channelID: String, before: Int?, after: Int?, limit: Int) async throws -> [Message]
     func fetchUnreadCount(channelID: String, after: Int, excludingProfileID: String) async throws -> Int
-    func sendMessage(channelID: String, text: String, idempotentKey: String) async throws -> Message
+    func sendMessage(channelID: String, text: String, imageSignedIDs: [String], idempotentKey: String) async throws -> Message
     func markRead(membershipID: String, messageID: Int) async throws -> Membership
     func searchMessages(channelID: String, query: String) async throws -> [Message]
 }
 extension APIClient: WindowsChatService {}
 
 public protocol WindowsImageService: Sendable {
-    func upload(data: Data, fileName: String, mimeType: String, apiKey: String) async throws -> ImgBBUpload
-    func delete(_ upload: ImgBBUpload, apiKey: String) async throws
+    func uploadImage(data: Data, fileName: String, mimeType: String) async throws -> ImageUpload
 }
-extension ImgBBClient: WindowsImageService {}
+extension APIClient: WindowsImageService {}
 
 public struct WindowsComposerImage: Identifiable, Sendable {
     public let id: UUID
     public let fileName: String
     public let localURL: URL
-    public fileprivate(set) var upload: ImgBBUpload?
+    public fileprivate(set) var upload: ImageUpload?
     public fileprivate(set) var isUploading = true
-    public fileprivate(set) var isDeleting = false
     public fileprivate(set) var error: String?
-    fileprivate var apiKey: String
-    fileprivate var removeWhenUploaded = false
 }
 
 public struct WindowsChannelSection: Identifiable {
@@ -64,7 +60,6 @@ public final class WindowsChatStore {
     }
     public var serverAddress: String { serverURL?.absoluteString ?? "https://kokoro.io" }
     public private(set) var pinnedChannelIDs: Set<String> = []
-    public private(set) var imgBBAPIKey = ""
     public private(set) var isSearchOpen = false
     public var searchQuery = "" {
         didSet {
@@ -78,8 +73,8 @@ public final class WindowsChatStore {
     public var isShowingSearchResults: Bool { searchResults != nil }
     public var displayedMessages: [Message] { (searchResults ?? messages).map { imageFallback.applying(to: $0) } }
     public var composerImages: [WindowsComposerImage] { selectedChannelID.flatMap { imagesByChannel[$0] } ?? [] }
-    public var hasImgBBAPIKey: Bool { !imgBBAPIKey.isEmpty }
-    public var composedDraft: String { ComposerMessage.text(draft, imageURLs: composerImages.compactMap { $0.upload?.url }) }
+    public var composedDraft: String { draft.trimmingCharacters(in: .whitespacesAndNewlines) }
+    public var imageSignedIDs: [String] { composerImages.compactMap { $0.upload?.signedID } }
     public var channelSections: [WindowsChannelSection] {
         let sorted = channels.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         return [
@@ -96,13 +91,15 @@ public final class WindowsChatStore {
     public var selectedChannel: Channel? { channels.first { $0.id == selectedChannelID } }
     public var canSend: Bool {
         profile != nil && selectedChannel?.membership?.canPost == true && !isSending
-        && !composedDraft.isEmpty && composedDraft.unicodeScalars.count <= 4000
-        && composerImages.allSatisfy { !$0.isUploading && !$0.isDeleting && !$0.removeWhenUploaded && $0.error == nil && $0.upload != nil }
+        && (!composedDraft.isEmpty || !composerImages.isEmpty) && composedDraft.unicodeScalars.count <= 4000
+        && composerImages.allSatisfy { !$0.isUploading && $0.error == nil && $0.upload != nil }
     }
     private let makeClient: (URL, String) -> any WindowsChatService
     private let usesRealtime: Bool
     private let defaults: UserDefaults
-    private let imageService: any WindowsImageService
+    private let imageServiceOverride: (any WindowsImageService)?
+    private var imageService: (any WindowsImageService)?
+    private var imageUploadTasks: [UUID: Task<Void, Never>] = [:]
     private let realtime = RealtimeClient()
     private var client: (any WindowsChatService)?
     private var serverURL: URL?
@@ -115,7 +112,7 @@ public final class WindowsChatStore {
     private var imageFallback = UploadedImageFallback()
     private var imageFallbackTask: Task<Void, Never>?
     private var imageFallbackRequestID: UUID?
-    private var pendingSends: [String: (text: String, key: String)] = [:]
+    private var pendingSends: [String: (text: String, signedIDs: [String], key: String)] = [:]
     private var readCursors: [String: Int] = [:]
     private var readInFlight: Set<String> = []
     private var readFailures: [String: Date] = [:]
@@ -125,12 +122,12 @@ public final class WindowsChatStore {
     private var refreshInFlight = false
 
     public init(usesRealtime: Bool = true, defaults: UserDefaults = .standard,
-                imageService: any WindowsImageService = ImgBBClient(),
+                imageService: (any WindowsImageService)? = nil,
                 makeClient: @escaping (URL, String) -> any WindowsChatService = { APIClient(baseURL: $0, token: $1) }) {
         self.makeClient = makeClient
         self.usesRealtime = usesRealtime
         self.defaults = defaults
-        self.imageService = imageService
+        self.imageServiceOverride = imageService
         self.notificationsEnabled = defaults.object(forKey: "windows.notifications.enabled") as? Bool ?? true
         self.notificationSoundEnabled = defaults.object(forKey: "windows.notifications.soundEnabled") as? Bool ?? true
         self.notificationTarget = DesktopNotificationTarget(rawValue: defaults.string(forKey: "windows.notifications.target") ?? "") ?? .mentionsAndDirectMessages
@@ -168,6 +165,7 @@ public final class WindowsChatStore {
             let joined = try await service.fetchChannels()
             guard sessionID == session else { return false }
             client = service
+            imageService = imageServiceOverride ?? APIClient(baseURL: url, token: token)
             serverURL = url
             profile = user
             pinsKey = "windows.pinnedChannels.\(url.absoluteString).\(user.id)"
@@ -192,17 +190,9 @@ public final class WindowsChatStore {
         resetImageFallback()
         resetSearch()
         serverURL = nil; pinsKey = nil; pinnedChannelIDs = []
-        // A failed or suspended send may already have reached the server. Never
-        // delete images referenced by an unacknowledged message on sign-out.
-        let abandonedUploads = imagesByChannel.flatMap { channelID, images in
-            images.filter { image in
-                !image.isDeleting && !(image.upload.map { pendingSends[channelID]?.text.contains($0.url.absoluteString) == true } ?? false)
-            }
-        }
-        let service = imageService
-        for image in abandonedUploads {
-            if let upload = image.upload { Task { try? await service.delete(upload, apiKey: image.apiKey) } }
-        }
+        imageUploadTasks.values.forEach { $0.cancel() }
+        imageUploadTasks = [:]
+        imageService = nil
         client = nil; profile = nil; channels = []; messages = []; selectedChannelID = nil
         drafts = [:]; imagesByChannel = [:]; pendingSends = [:]; readCursors = [:]; readInFlight = []
         readFailures = [:]
@@ -224,18 +214,12 @@ public final class WindowsChatStore {
         onChange?()
     }
 
-    /// The UI persists this key in Windows Credential Manager before updating state.
-    public func updateImgBBAPIKey(_ value: String) {
-        imgBBAPIKey = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        onChange?()
-    }
-
     public func addImages(_ urls: [URL]) {
-        guard let id = selectedChannelID, selectedChannel?.membership?.canPost == true, !isSending else { return }
-        guard hasImgBBAPIKey else { reportError(ImgBBError.missingAPIKey.localizedDescription); return }
+        guard let id = selectedChannelID, selectedChannel?.membership?.canPost == true,
+              !isSending, imageService != nil else { return }
         for url in urls {
-            guard url.isFileURL else { reportError(ImgBBError.invalidImage.localizedDescription); continue }
-            let image = WindowsComposerImage(id: UUID(), fileName: url.lastPathComponent, localURL: url, apiKey: imgBBAPIKey)
+            guard url.isFileURL else { reportError(ImageUploadError.invalidImage.localizedDescription); continue }
+            let image = WindowsComposerImage(id: UUID(), fileName: url.lastPathComponent, localURL: url)
             imagesByChannel[id, default: []].append(image)
             uploadImage(image.id, in: id)
         }
@@ -245,62 +229,59 @@ public final class WindowsChatStore {
     public func retryImage(_ id: UUID) {
         guard !isSending, let channelID = selectedChannelID,
               let image = imagesByChannel[channelID]?.first(where: { $0.id == id }),
-              !image.isUploading, !image.isDeleting, image.error != nil else { return }
-        if image.upload != nil { deleteImage(id, in: channelID); return }
-        guard hasImgBBAPIKey else { reportError(ImgBBError.missingAPIKey.localizedDescription); return }
-        updateImage(id, in: channelID) { $0.apiKey = imgBBAPIKey; $0.isUploading = true; $0.error = nil }
+              !image.isUploading, image.error != nil else { return }
+        updateImage(id, in: channelID) { $0.isUploading = true; $0.error = nil }
         uploadImage(id, in: channelID)
     }
 
     public func removeImage(_ id: UUID) {
+        guard !isSending, let channelID = selectedChannelID else { return }
+        imageUploadTasks.removeValue(forKey: id)?.cancel()
+        imagesByChannel[channelID]?.removeAll { $0.id == id }
+        // Unattached server uploads are automatically purged; there is no delete API.
+        onChange?()
+    }
+
+    public func moveImage(_ id: UUID, to index: Int) {
         guard !isSending, let channelID = selectedChannelID,
-              let image = imagesByChannel[channelID]?.first(where: { $0.id == id }), !image.isDeleting else { return }
-        if image.isUploading {
-            updateImage(id, in: channelID) { $0.removeWhenUploaded = true }
-        } else if image.upload != nil {
-            deleteImage(id, in: channelID)
-        } else {
-            imagesByChannel[channelID]?.removeAll { $0.id == id }; onChange?()
-        }
+              var images = imagesByChannel[channelID],
+              let previous = images.firstIndex(where: { $0.id == id }),
+              images.indices.contains(index), previous != index else { return }
+        let image = images.remove(at: previous)
+        images.insert(image, at: index)
+        imagesByChannel[channelID] = images
+        onChange?()
     }
 
     private func uploadImage(_ id: UUID, in channelID: String) {
-        guard let image = imagesByChannel[channelID]?.first(where: { $0.id == id }) else { return }
-        let session = sessionID, service = imageService
-        Task { [weak self] in
+        guard let image = imagesByChannel[channelID]?.first(where: { $0.id == id }),
+              let service = imageService else { return }
+        let session = sessionID
+        imageUploadTasks[id] = Task { [weak self] in
+            defer {
+                if self?.sessionID == session { self?.imageUploadTasks[id] = nil }
+            }
             do {
                 let data = try await Task.detached(priority: .utility) {
-                    let size = try image.localURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-                    guard size <= 32 * 1024 * 1024 else { throw ImgBBError.imageTooLarge }
                     let data = try Data(contentsOf: image.localURL)
-                    guard !data.isEmpty else { throw ImgBBError.invalidImage }
+                    guard !data.isEmpty else { throw ImageUploadError.invalidImage }
                     return data
                 }.value
                 let mime = Self.imageMIMEType(image.localURL.pathExtension)
-                guard let mime else { throw ImgBBError.invalidImage }
+                try Task.checkCancellation()
                 guard self?.sessionID == session else { return }
-                let upload = try await service.upload(data: data, fileName: image.fileName, mimeType: mime, apiKey: image.apiKey)
-                guard let self, self.sessionID == session,
-                      self.imagesByChannel[channelID]?.contains(where: { $0.id == id }) == true else {
-                    try? await service.delete(upload, apiKey: image.apiKey)
-                    return
-                }
-                self.updateImage(id, in: channelID) { $0.upload = upload; $0.isUploading = false; $0.error = nil }
-                if self.imagesByChannel[channelID]?.first(where: { $0.id == id })?.removeWhenUploaded == true {
-                    self.deleteImage(id, in: channelID)
-                }
-            } catch {
+                let upload = try await service.uploadImage(data: data, fileName: image.fileName, mimeType: mime)
+                try Task.checkCancellation()
                 guard let self, self.sessionID == session else { return }
-                if self.imagesByChannel[channelID]?.first(where: { $0.id == id })?.removeWhenUploaded == true {
-                    self.imagesByChannel[channelID]?.removeAll { $0.id == id }; self.onChange?()
-                } else {
-                    self.updateImage(id, in: channelID) { $0.isUploading = false; $0.error = error.localizedDescription }
-                }
+                self.updateImage(id, in: channelID) { $0.upload = upload; $0.isUploading = false; $0.error = nil }
+            } catch {
+                guard !Task.isCancelled, let self, self.sessionID == session else { return }
+                self.updateImage(id, in: channelID) { $0.isUploading = false; $0.error = error.localizedDescription }
             }
         }
     }
 
-    private static func imageMIMEType(_ extensionName: String) -> String? {
+    private static func imageMIMEType(_ extensionName: String) -> String {
         switch extensionName.lowercased() {
         case "jpg", "jpeg": return "image/jpeg"
         case "png": return "image/png"
@@ -308,25 +289,10 @@ public final class WindowsChatStore {
         case "webp": return "image/webp"
         case "bmp": return "image/bmp"
         case "tif", "tiff": return "image/tiff"
-        case "heic", "heif": return "image/heic"
+        case "heic": return "image/heic"
+        case "heif": return "image/heif"
         case "avif": return "image/avif"
-        default: return nil
-        }
-    }
-
-    private func deleteImage(_ id: UUID, in channelID: String) {
-        guard let image = imagesByChannel[channelID]?.first(where: { $0.id == id }), let upload = image.upload else { return }
-        let session = sessionID, service = imageService
-        updateImage(id, in: channelID) { $0.isDeleting = true; $0.error = nil }
-        Task { [weak self] in
-            do {
-                try await service.delete(upload, apiKey: image.apiKey)
-                guard let self, self.sessionID == session else { return }
-                self.imagesByChannel[channelID]?.removeAll { $0.id == id }; self.onChange?()
-            } catch {
-                guard let self, self.sessionID == session else { return }
-                self.updateImage(id, in: channelID) { $0.isDeleting = false; $0.error = error.localizedDescription }
-            }
+        default: return "application/octet-stream"
         }
     }
 
@@ -398,14 +364,14 @@ public final class WindowsChatStore {
 
     public func send() async {
         guard canSend, let client, let id = selectedChannelID else { return }
-        let session = sessionID, text = composedDraft, draftSnapshot = draft
+        let session = sessionID, text = composedDraft, draftSnapshot = draft, signedIDs = imageSignedIDs
         let sentImageIDs = Set(composerImages.map(\.id))
-        let key = pendingSends[id].flatMap { $0.text == text ? $0.key : nil } ?? UUID().uuidString.lowercased()
-        pendingSends[id] = (text, key)
+        let key = pendingSends[id].flatMap { $0.text == text && $0.signedIDs == signedIDs ? $0.key : nil } ?? UUID().uuidString.lowercased()
+        pendingSends[id] = (text, signedIDs, key)
         isSending = true; error = nil; onChange?()
         defer { if session == sessionID { isSending = false; onChange?() } }
         do {
-            let message = try await client.sendMessage(channelID: id, text: text, idempotentKey: key)
+            let message = try await client.sendMessage(channelID: id, text: text, imageSignedIDs: signedIDs, idempotentKey: key)
             guard session == sessionID else { return }
             pendingSends[id] = nil
             if drafts[id] == draftSnapshot { drafts[id] = "" }

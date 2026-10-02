@@ -164,7 +164,7 @@ enum WindowsUIAudit {
     }
 
     static func validateComposer(_ snapshot: Snapshot, channelName: String,
-                                 hasImageKey: Bool, canSend: Bool, isSending: Bool = false) -> [String] {
+                                 canAttach: Bool, canSend: Bool, isSending: Bool = false) -> [String] {
         var failures = snapshot.inspectionFailures
         func expect(_ condition: Bool, _ message: String) { if !condition { failures.append(message) } }
         guard let editor = snapshot.nodes.first(where: { $0.kind == "TextBox" && $0.automationName == "メッセージ" }) else {
@@ -189,7 +189,7 @@ enum WindowsUIAudit {
             expect(snapshot.isDescendant(action, of: card), "Composer icon \(action.actionLabel) must be inside the editor card.")
             expect(action.text == nil, "Composer actions must use icons instead of visible text buttons.")
         }
-        expect(image?.enabled == (hasImageKey && !isSending), "Image action must be disabled without an API key or during sending.")
+        expect(image?.enabled == (canAttach && !isSending), "Image action must follow channel posting permission and sending state.")
         expect(emoji?.enabled == !isSending, "Emoji action must be disabled during sending.")
         expect(send?.enabled == canSend, "Send action does not reflect draft eligibility.")
         if let image = image?.bounds, let emoji = emoji?.bounds, let send = send?.bounds, let editor = editor.bounds {
@@ -228,7 +228,7 @@ enum WindowsUIAudit {
         var failures = snapshot.inspectionFailures
         func expect(_ condition: Bool, _ message: String) { if !condition { failures.append(message) } }
         let headings = snapshot.nodes.filter { $0.kind == "TextBlock" && $0.fontSize == 13 && $0.fontWeight == 600 }
-        expect(headings.compactMap(\.text) == ["通知", "画像アップロード", "接続"], "Settings must contain exactly three ordered sections: notifications, image upload, connection.")
+        expect(headings.compactMap(\.text) == ["通知", "接続"], "Settings must contain exactly two ordered sections: notifications, connection.")
         for text in ["接続済み", "接続中…", "再接続中…", "未接続"] {
             expect(snapshot.matching(text).isEmpty, "Settings must not show realtime connection status (\(text)).")
         }
@@ -240,16 +240,12 @@ enum WindowsUIAudit {
         let targets = snapshot.nodes.filter { $0.kind == "ComboBox" }
         expect(targets.count == 1 && targets.first?.enabled == notificationsEnabled, "Notification target must follow notification-switch availability.")
         if toggles.count == 2 { expect(toggles[1].enabled == notificationsEnabled, "Notification sound must follow notification-switch availability.") }
-        let keys = snapshot.nodes.filter { $0.kind == "PasswordBox" }
-        expect(keys.count == 1 && keys.first?.placeholder == "ImgBB の API キー", "Image-upload settings requires one secure ImgBB key field.")
-        expect(!snapshot.nodes.contains { $0.kind == "Button" && ($0.text?.contains("保存") == true) }, "ImgBB key must persist edits without a separate Save button.")
+        expect(!snapshot.nodes.contains { $0.kind == "PasswordBox" }, "Settings must not require a separate image-upload credential.")
         expect(snapshot.matching("サーバー").count == 1, "Connection section must show the server.")
         expect(snapshot.matching("アカウント").count == (signedIn ? 1 : 0), "Account row must follow signed-in state.")
         expect(snapshot.matching("ログアウト").count == (signedIn ? 1 : 0), "Logout must follow signed-in state.")
-        if headings.count == 3, let uploadY = headings[1].bounds?.y, let connectionY = headings[2].bounds?.y,
-           let keyY = keys.first?.bounds?.y {
-            expect(keyY > uploadY && keyY < connectionY, "ImgBB key must be inside the image-upload section.")
-            expect(toggles.allSatisfy { ($0.bounds?.y ?? .infinity) < uploadY }, "Notification switches must remain in the notification section.")
+        if headings.count == 2, let connectionY = headings[1].bounds?.y {
+            expect(toggles.allSatisfy { ($0.bounds?.y ?? .infinity) < connectionY }, "Notification switches must remain in the notification section.")
         }
         if let size = snapshot.nodes.first?.bounds {
             expect(abs(size.width - 480) < 2 && abs(size.height - 470) < 2, "Settings content must retain the macOS 480 by 470 point size.")

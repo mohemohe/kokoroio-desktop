@@ -7,10 +7,8 @@ struct ComposerImage: Identifiable {
     let id: UUID
     let fileName: String
     let thumbnail: NSImage?
-    var upload: ImgBBUpload?
+    var upload: ImageUpload?
     var isUploading = true
-    var isDeleting = false
-    var removeWhenUploaded = false
     var error: String?
 }
 
@@ -33,8 +31,6 @@ final class ChatStore: ObservableObject {
     @Published var errorMessage: String?
     @Published var draft = ""
     @Published private(set) var composerImages: [ComposerImage] = []
-    @Published private(set) var imgBBAPIKey = ""
-    @Published private(set) var imgBBSettingsError: String?
     @Published var channelSearch = ""
     @Published var isSearchOpen = false
     @Published var searchQuery = ""
@@ -61,10 +57,10 @@ final class ChatStore: ObservableObject {
     private var selectionID = UUID()
     private var drafts: [String: String] = [:]
     private var imagesByChannel: [String: [ComposerImage]] = [:]
-    private let imgBBClient = ImgBBClient()
+    private var imageTasks: [UUID: Task<Void, Never>] = [:]
     private var cache: [String: [Message]] = [:]
     private var confirmedTails: [String: Int] = [:]
-    private var pendingSends: [String: (text: String, key: String)] = [:]
+    private var pendingSends: [String: (text: String, imageSignedIDs: [String], key: String)] = [:]
     private var seenEvents: Set<Int> = []
     private var eventRevision = 0
     private var messageRevisions: [Int: Int] = [:]
@@ -81,8 +77,6 @@ final class ChatStore: ObservableObject {
     init(notifications: NotificationService, defaults: UserDefaults = .standard) {
         self.notifications = notifications
         self.defaults = defaults
-        do { imgBBAPIKey = try CredentialStore.loadImgBBAPIKey() ?? "" }
-        catch { imgBBSettingsError = error.localizedDescription }
         notifications.onOpenChannel = { [weak self] id in
             NSApp.activate(ignoringOtherApps: true)
             NSApp.windows.first(where: { $0.canBecomeMain })?.makeKeyAndOrderFront(nil)
@@ -100,26 +94,18 @@ final class ChatStore: ObservableObject {
     }
 
     var selectedChannel: Channel? { channels.first { $0.id == selectedChannelID } }
-    var hasImgBBAPIKey: Bool { !imgBBAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-    var composedDraft: String {
-        ComposerMessage.text(draft, imageURLs: composerImages.compactMap { $0.upload?.url })
-    }
+    var canAddImages: Bool { client != nil && selectedChannelID != nil && !isSending }
+    var composedDraft: String { draft.trimmingCharacters(in: .whitespacesAndNewlines) }
+    var imageSignedIDs: [String] { composerImages.compactMap { $0.upload?.signedID } }
     var canSendDraft: Bool {
-        !isSending && selectedChannelID != nil && !composedDraft.isEmpty
+        !isSending && client != nil && selectedChannelID != nil
+            && (!composedDraft.isEmpty || !imageSignedIDs.isEmpty)
             && composedDraft.unicodeScalars.count <= 4_000
-            && composerImages.allSatisfy { !$0.isUploading && !$0.isDeleting && $0.error == nil && $0.upload != nil }
-    }
-
-    func updateImgBBAPIKey(_ value: String) {
-        do {
-            try CredentialStore.saveImgBBAPIKey(value)
-            imgBBAPIKey = value
-            imgBBSettingsError = nil
-        } catch { imgBBSettingsError = error.localizedDescription }
+            && composerImages.allSatisfy { !$0.isUploading && $0.error == nil && $0.upload != nil }
     }
 
     func addImages(_ urls: [URL]) {
-        guard selectedChannelID != nil, hasImgBBAPIKey, !isSending else { return }
+        guard canAddImages else { return }
         for url in urls {
             let previewAccess = url.startAccessingSecurityScopedResource()
             let thumbnail = NSImage(contentsOf: url)
@@ -138,7 +124,7 @@ final class ChatStore: ObservableObject {
     }
 
     func addImageData(_ data: Data, fileName: String, mimeType: String) {
-        guard selectedChannelID != nil, hasImgBBAPIKey, !isSending else { return }
+        guard canAddImages else { return }
         addImage(fileName: fileName, thumbnail: NSImage(data: data)) { (data, mimeType) }
     }
 
@@ -147,66 +133,40 @@ final class ChatStore: ObservableObject {
         thumbnail: NSImage?,
         loadData: @escaping @Sendable () async throws -> (Data, String)
     ) {
-        guard let channelID = selectedChannelID, hasImgBBAPIKey, !isSending else { return }
+        guard canAddImages, let channelID = selectedChannelID, let api = client else { return }
         let id = UUID()
-        let key = imgBBAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let session = sessionID
         setImages(images(in: channelID) + [ComposerImage(id: id, fileName: fileName, thumbnail: thumbnail)], in: channelID)
-        Task { [weak self] in
+        imageTasks[id] = Task { [weak self] in
+            defer {
+                if let self, self.sessionID == session { self.imageTasks[id] = nil }
+            }
             do {
                 let (data, mimeType) = try await loadData()
-                let upload = try await self?.imgBBClient.upload(data: data, fileName: fileName, mimeType: mimeType, apiKey: key)
-                guard let self, let upload else { return }
-                if self.sessionID != session || self.image(id, in: channelID) == nil {
-                    try? await self.imgBBClient.delete(upload, apiKey: key)
-                    return
-                }
+                try Task.checkCancellation()
+                guard let self, self.sessionID == session, self.image(id, in: channelID) != nil else { return }
+                let upload = try await api.uploadImage(data: data, fileName: fileName, mimeType: mimeType)
+                try Task.checkCancellation()
+                guard self.sessionID == session, self.image(id, in: channelID) != nil else { return }
                 self.updateImage(id, in: channelID) { image in
                     image.upload = upload
                     image.isUploading = false
                 }
-                if self.image(id, in: channelID)?.removeWhenUploaded == true {
-                    self.removeImage(id, from: channelID)
-                }
             } catch {
-                guard let self, self.sessionID == session else { return }
+                guard !Task.isCancelled, let self, self.sessionID == session else { return }
                 self.updateImage(id, in: channelID) { image in
                     image.isUploading = false
-                    image.isDeleting = false
                     image.error = error.localizedDescription
-                }
-                if self.image(id, in: channelID)?.removeWhenUploaded == true {
-                    self.removeLocalImage(id, from: channelID)
                 }
             }
         }
     }
 
     func removeImage(_ id: UUID) {
-        guard let channelID = selectedChannelID else { return }
-        removeImage(id, from: channelID)
-    }
-
-    private func removeImage(_ id: UUID, from channelID: String) {
-        guard !isSending, let image = image(id, in: channelID), !image.isDeleting else { return }
-        if image.isUploading {
-            updateImage(id, in: channelID) { $0.removeWhenUploaded = true }
-            return
-        }
-        guard let upload = image.upload else { removeLocalImage(id, from: channelID); return }
-        updateImage(id, in: channelID) { $0.isDeleting = true; $0.error = nil }
-        let session = sessionID
-        let key = imgBBAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        Task { [weak self] in
-            do {
-                try await self?.imgBBClient.delete(upload, apiKey: key)
-                guard let self, self.sessionID == session else { return }
-                self.removeLocalImage(id, from: channelID)
-            } catch {
-                guard let self, self.sessionID == session else { return }
-                self.updateImage(id, in: channelID) { $0.isDeleting = false; $0.error = error.localizedDescription }
-            }
-        }
+        guard let channelID = selectedChannelID, !isSending, image(id, in: channelID) != nil else { return }
+        imageTasks.removeValue(forKey: id)?.cancel()
+        // The server purges unattached uploads; removing a draft needs no delete request.
+        removeLocalImage(id, from: channelID)
     }
 
     func moveImage(_ id: UUID, to targetID: UUID) {
@@ -441,16 +401,18 @@ final class ChatStore: ObservableObject {
         guard canSendDraft, let channel = selectedChannel else { return }
         let text = composedDraft
         guard let api = client else { return }
+        let signedIDs = imageSignedIDs
         let pending = pendingSends[channel.id]
-        let key = pending?.text == text ? pending!.key : UUID().uuidString.lowercased()
-        pendingSends[channel.id] = (text, key)
+        let key = pending?.text == text && pending?.imageSignedIDs == signedIDs
+            ? pending!.key : UUID().uuidString.lowercased()
+        pendingSends[channel.id] = (text, signedIDs, key)
         isSending = true
         let session = sessionID
         let originalDraft = draft
         let revision = eventRevision
         Task {
             do {
-                let message = try await api.sendMessage(channelID: channel.id, text: text, idempotentKey: key)
+                let message = try await api.sendMessage(channelID: channel.id, text: text, imageSignedIDs: signedIDs, idempotentKey: key)
                 guard self.sessionID == session else { return }
                 self.mergeREST([message], channelID: channel.id, startedAt: revision)
                 self.pendingSends[channel.id] = nil
@@ -716,6 +678,7 @@ final class ChatStore: ObservableObject {
         notifications.resetSession()
         refreshTask?.cancel(); refreshTask = nil
         readTasks.values.forEach { $0.cancel() }; readTasks = [:]
+        imageTasks.values.forEach { $0.cancel() }; imageTasks = [:]
         client = nil; credential = nil; channels = []; messages = []; cache = [:]; drafts = [:]; imagesByChannel = [:]; composerImages = []; confirmedTails = [:]
         pinnedChannelIDs = []
         pendingSends = [:]; seenEvents = []; messageRevisions = [:]; eventRevision = 0; profile = nil; selectedChannelID = nil

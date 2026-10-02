@@ -14,8 +14,7 @@ final class WindowsSettingsWindow {
     private let scroll = ScrollViewer()
     private let notifications = ToggleSwitch(), sound = ToggleSwitch()
     private let target = ComboBox()
-    private let key = PasswordBox()
-    private let notificationError = TextBlock(), keyError = TextBlock()
+    private let notificationError = TextBlock()
     private let authorization = TextBlock()
     private let permissionActions = StackPanel()
     private let serverValue = TextBlock(), accountValue = TextBlock()
@@ -35,7 +34,7 @@ final class WindowsSettingsWindow {
          onNotificationsEnabled: @escaping () -> Void) {
         self.store = store
         self.notificationService = notificationService
-        primaryControls = [notifications, sound, target, key]
+        primaryControls = [notifications, sound, target]
         window.title = "設定"
         WindowsTitleBar.configure(for: window)
 
@@ -88,18 +87,6 @@ final class WindowsSettingsWindow {
         configureError(notificationError)
         notificationSection.children.append(notificationError)
 
-        let imageSection = section("画像アップロード", in: form)
-        key.placeholderText = "ImgBB の API キー"
-        try? AutomationProperties.setName(key, "ImgBB の API キー")
-        key.password = store.imgBBAPIKey
-        key.fontSize = 13
-        key.minHeight = 28
-        key.padding = .init(left: 8, top: 4, right: 8, bottom: 4)
-        imageSection.children.append(key)
-        imageSection.children.append(caption("API キーは Windows の資格情報マネージャーに保存されます。入力すると投稿欄から画像を追加できます。"))
-        configureError(keyError)
-        imageSection.children.append(keyError)
-
         let connectionSection = section("接続", in: form)
         configureValue(serverValue)
         configureValue(accountValue)
@@ -131,15 +118,6 @@ final class WindowsSettingsWindow {
         sound.toggled.addHandler { [weak self] _, _ in
             guard let self, !updating else { return }
             store.notificationSoundEnabled = sound.isOn
-        }
-        // The macOS secure field persists each edit and has no separate Save action.
-        key.passwordChanged.addHandler { [weak self] _, _ in
-            guard let self, !updating else { return }
-            do {
-                try WindowsImgBBKeyStore.save(key.password)
-                store.updateImgBBAPIKey(key.password)
-                setError(nil, on: keyError)
-            } catch { setError(error.localizedDescription, on: keyError) }
         }
         window.activated.addHandler { [weak self] _, _ in self?.refresh() }
         scroll.actualThemeChanged.addHandler { [weak self] _, _ in self?.refreshThemeColors() }
@@ -284,7 +262,6 @@ final class WindowsSettingsWindow {
             ? .init(a: 255, r: 255, g: 69, b: 58) : .init(a: 255, r: 196, g: 43, b: 36))
         signOut.foreground = destructive
         notificationError.foreground = destructive
-        keyError.foreground = destructive
         let link = SolidColorBrush(dark
             ? .init(a: 255, r: 196, g: 166, b: 245) : .init(a: 255, r: 110, g: 74, b: 168))
         links.forEach { $0.foreground = link }
