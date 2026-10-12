@@ -228,6 +228,12 @@ public struct EmbedContent: Codable, Hashable, Sendable {
         return result
     }
 
+    public var standaloneImagePreviews: [EmbedImagePreview] {
+        let previews = imagePreviews
+        guard !isImageOnly, let thumbnail = cardThumbnailURL else { return previews }
+        return previews.filter { $0.thumbnailURL != thumbnail }
+    }
+
     public var cardTitle: String {
         if data?.available == false { return "参照先を表示できません" }
         if let title = data?.title?.nonemptyEmbedText { return title }
