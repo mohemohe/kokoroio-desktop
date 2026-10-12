@@ -161,9 +161,10 @@ final class TimelineMessageView {
         media.children.clear()
         let embeds = embeds
         media.visibility = embeds.isEmpty ? .collapsed : .visible
-        let previews = embeds.flatMap(\.imagePreviews)
-        let isSensitive = message.nsfw || embeds.contains(where: \.isRestricted)
-            || previews.contains(where: \.isRestricted)
+        let previews = embeds.flatMap(\.standaloneImagePreviews)
+        let isSensitive = message.nsfw || embeds.contains {
+            $0.isRestricted || $0.imagePreviews.contains(where: \.isRestricted)
+        }
 
         // Do not even create a BitmapImage/URI for gated content before this click.
         if isSensitive && !revealsSensitiveContent && !embeds.isEmpty {

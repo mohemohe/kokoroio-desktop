@@ -88,7 +88,8 @@ final class MessageEmbedTests: XCTestCase {
 
     func testRealtimeMessageUpdatedDecodesResolutionAddedAfterCreation() throws {
         let payload = messageJSON(embeds: [["url": "https://example.test/article", "position": 0,
-                                           "data": ["type": "MixedContent", "title": "Resolved later", "medias": []]]])
+                                           "data": ["type": "MixedContent", "title": "Resolved later", "medias": [
+                                            ["type": "Image", "raw_url": "https://images.example.test/article.png"]]]]])
         let wire: [String: Any] = ["identifier": ActionCableProtocol.identifier,
                                   "message": ["event": "message_updated", "data": payload]]
         let frame = try ActionCableProtocol.parse(JSONSerialization.data(withJSONObject: wire))
@@ -98,6 +99,8 @@ final class MessageEmbedTests: XCTestCase {
         XCTAssertEqual(message.id, 87)
         XCTAssertEqual(message.embedContents.first?.cardTitle, "Resolved later")
         XCTAssertEqual(message.embedContents.first?.linkURL?.absoluteString, "https://example.test/article")
+        XCTAssertEqual(message.embedContents.first?.cardThumbnailURL?.absoluteString, "https://images.example.test/article.png")
+        XCTAssertEqual(message.embedContents.first?.standaloneImagePreviews, [])
     }
 
     func testOldMessagesWithoutEmbedFieldsRemainDecodable() throws {
@@ -174,6 +177,76 @@ final class MessageEmbedTests: XCTestCase {
         XCTAssertEqual(video.linkURL.absoluteString, "https://videos.example.test/video.mp4")
         XCTAssertTrue(embeds[2].imagePreviews.isEmpty, "A video file must not be sent to an image loader")
         XCTAssertEqual(embeds[2].linkURL?.absoluteString, "https://example.test/watch2")
+    }
+
+    func testURLCardThumbnailIsNotAlsoShownAsStandaloneMedia() throws {
+        for metadata in [
+            ["metadata_image": ["type": "Image", "raw_url": "https://images.example.test/poster.png",
+                                "thumbnail": ["url": "https://images.example.test/poster-thumb.png"]]],
+            ["thumbnail_url": "https://images.example.test/poster-thumb.png"],
+            [:]
+        ] as [[String: Any]] {
+            var data: [String: Any] = ["type": "MixedContent", "title": "Video interview", "medias": [
+                ["type": "Image", "raw_url": "https://images.example.test/poster.png",
+                 "thumbnail": ["url": "https://images.example.test/poster-thumb.png"]]]]
+            data.merge(metadata) { _, value in value }
+            let embed = try XCTUnwrap(decodeMessage(messageJSON(embeds: [
+                ["url": "https://www.youtube.com/watch?v=example", "data": data]
+            ])).embedContents.first)
+            XCTAssertFalse(embed.isUploadedImage)
+            XCTAssertEqual(embed.imagePreviews.count, 1)
+            XCTAssertTrue(embed.standaloneImagePreviews.isEmpty)
+            XCTAssertEqual(embed.cardThumbnailURL?.absoluteString, "https://images.example.test/poster-thumb.png")
+            XCTAssertEqual(embed.cardTitle, "Video interview")
+        }
+    }
+
+    func testCardThumbnailFilteringPreservesOtherMediaAndTheirOrder() throws {
+        let embeds = try decodeMessage(messageJSON(embeds: [["url": "https://example.test/post", "data": [
+            "type": "MixedContent", "metadata_image": ["raw_url": "https://images.example.test/author.png"],
+            "medias": [
+                ["type": "Image", "raw_url": "https://images.example.test/first.png"],
+                ["type": "Image", "raw_url": "https://images.example.test/author.png"],
+                ["type": "Video", "raw_url": "https://videos.example.test/video.mp4",
+                 "thumbnail": ["url": "https://images.example.test/video.png"]]],
+            "images": [["url": "https://images.example.test/author.png"],
+                       ["url": "https://images.example.test/last.png"]]
+        ]]])).embedContents
+        XCTAssertEqual(embeds[0].standaloneImagePreviews.map(\.id), ["media-0", "media-2", "image-1"])
+        XCTAssertEqual(embeds[0].standaloneImagePreviews.map(\.thumbnailURL.lastPathComponent),
+                       ["first.png", "video.png", "last.png"])
+        XCTAssertTrue(embeds[0].standaloneImagePreviews[1].isVideo)
+        XCTAssertEqual(embeds[0].cardThumbnailURL?.lastPathComponent, "author.png")
+    }
+
+    func testUploadsAndImageOnlyLinksAreNotDeduplicatedAgainstCards() throws {
+        var payload = messageJSON(embeds: [
+            ["url": "https://example.test/page", "position": 0, "data": [
+                "type": "MixedContent", "medias": [["type": "Image", "raw_url": "https://images.example.test/shared.png"]]]],
+            ["position": 1, "image": ["url": "https://images.example.test/shared.png"]],
+            ["position": 2, "data": ["type": "UploadedImage", "url": "https://images.example.test/shared.png"]],
+            ["url": "https://images.example.test/shared.png", "position": 3, "data": ["type": "SingleImage"]],
+            ["url": "https://images.example.test/shared.png", "position": 4, "data": ["type": "photo"]]
+        ])
+        let message = try decodeMessage(payload)
+        XCTAssertTrue(message.embedContents[0].standaloneImagePreviews.isEmpty)
+        for embed in message.embedContents.dropFirst() {
+            XCTAssertEqual(embed.standaloneImagePreviews.count, 1)
+            XCTAssertEqual(embed.standaloneImagePreviews, embed.imagePreviews)
+        }
+        payload["expand_embed_contents"] = false
+        let collapsed = try decodeMessage(payload).embedContents.filter(\.isUploadedImage)
+        XCTAssertEqual(collapsed.flatMap(\.standaloneImagePreviews).count, 2)
+    }
+
+    func testRestrictedVideoCardRetainsMetadataWhenStandaloneThumbnailIsSuppressed() {
+        let embed = EmbedContent(url: URL(string: "https://example.test/watch"), data: EmbedData(
+            type: "SingleVideo", medias: [EmbedMedia(type: "Video", rawURL: URL(string: "https://videos.example.test/video.mp4"),
+                                                    thumbnail: EmbedImageInfo(url: URL(string: "https://images.example.test/poster.png")),
+                                                    restrictionPolicy: "Restricted")]))
+        XCTAssertTrue(embed.standaloneImagePreviews.isEmpty)
+        XCTAssertEqual(embed.cardThumbnailURL?.lastPathComponent, "poster.png")
+        XCTAssertTrue(embed.imagePreviews.contains(where: \.isRestricted), "Card-only media must still trigger the sensitive-content gate")
     }
 
     func testUnavailableInternalReferencesDoNotExposeStalePreviewContent() throws {

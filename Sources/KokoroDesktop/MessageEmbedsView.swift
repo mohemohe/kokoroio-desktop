@@ -10,11 +10,11 @@ struct MessageEmbedsView: View {
         message.embedContents.filter { message.expandEmbedContents || $0.isUploadedImage }
     }
 
-    private var images: [EmbedImagePreview] { embeds.flatMap(\.imagePreviews) }
+    private var images: [EmbedImagePreview] { embeds.flatMap(\.standaloneImagePreviews) }
     private var unavailableImages: [EmbedContent] { embeds.filter(\.hasUnavailableImage) }
     private var cards: [EmbedContent] { embeds.filter { !$0.isImageOnly && !$0.isUploadedImage } }
     private var isSensitive: Bool {
-        message.nsfw || embeds.contains(where: \.isRestricted) || images.contains(where: \.isRestricted)
+        message.nsfw || embeds.contains { $0.isRestricted || $0.imagePreviews.contains(where: \.isRestricted) }
     }
 
     var body: some View {
